@@ -1,8 +1,6 @@
-# NOTE on OpenCV: mediapipe depends on opencv-contrib-python. Do NOT also list
-# opencv-python here -- installing both puts two copies of the cv2 module in the
-# same environment and causes version conflicts on some PCs. We rely on the
-# contrib build (it is a superset and provides everything this app uses).
-opencv-contrib-python==4.10.0.84
-mediapipe==0.10.14
-pyvirtualcam==0.11.0
-numpy==1.26.4
+# Face detection uses OpenCV's built-in YuNet (cv2.FaceDetectorYN) -- NOT
+# MediaPipe -- so this stack has prebuilt wheels for Python 3.9 through 3.14
+# (including 3.13 / 3.14). No compiler required.
+opencv-python==4.11.0.86   # abi3 wheels: install on any Python 3.x
+numpy==2.5.1               # wheels for cp312 / cp313 / cp314
+pyvirtualcam==0.15.0       # wheels for cp39 .. cp314

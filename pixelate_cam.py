@@ -5,13 +5,19 @@ A portable virtual-camera app that pixelates ONLY faces in your webcam feed,
 leaving the body and background untouched, then publishes the result to the
 OBS/Streamlabs Virtual Camera so you can select it as a Video Capture Device.
 
+Face detection uses OpenCV's built-in YuNet detector (cv2.FaceDetectorYN) -- no
+MediaPipe -- so it installs with prebuilt wheels on Python 3.9 through 3.14
+(including 3.13 / 3.14) with no compiler needed. YuNet needs one small model
+file that ships alongside this script:
+
+    face_detection_yunet_2023mar.onnx
+
 Features
 --------
 - Face pixelation (faces only) with safety-biased tracking:
   detection runs every frame, boxes are padded, and a "hold last position"
   buffer keeps faces covered during fast motion or profile angles.
 - Live lighting: brightness, contrast, saturation, warmth, gamma.
-- Experimental body slim (off by default) using selfie segmentation + pinch warp.
 - Live hotkeys and a preview window. Settings persist to settings.json.
 
 Run:  python pixelate_cam.py         (opens preview + virtual cam)
@@ -26,8 +32,6 @@ Hotkeys (focus the preview window):
   s / S   : saturation  down / up
   w / W   : warmth      cooler / warmer
   g / G   : gamma       down / up
-  m       : toggle body slim (experimental)
-  , / .   : slim intensity  down / up
   h       : toggle on-screen help overlay
   p       : toggle pixelation on/off (panic peek)
   0       : reset all lighting adjustments to neutral
@@ -40,13 +44,12 @@ import os
 import sys
 import time
 
-import cv2
 import numpy as np
 
 try:
-    import mediapipe as mp
+    import cv2
 except ImportError:
-    print("ERROR: mediapipe is not installed. Run setup.bat first.")
+    print("ERROR: opencv-python is not installed. Run setup.bat first.")
     sys.exit(1)
 
 try:
@@ -57,8 +60,17 @@ except ImportError:
     HAVE_VCAM = False
 
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-SETTINGS_PATH = os.path.join(HERE, "settings.json")
+if getattr(sys, "frozen", False):
+    # Running inside a PyInstaller one-file exe: bundled data (the model) is
+    # extracted to sys._MEIPASS, while settings should live next to the exe.
+    BUNDLE_DIR = sys._MEIPASS
+    APP_DIR = os.path.dirname(sys.executable)
+else:
+    BUNDLE_DIR = os.path.dirname(os.path.abspath(__file__))
+    APP_DIR = BUNDLE_DIR
+
+SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
+MODEL_PATH = os.path.join(BUNDLE_DIR, "face_detection_yunet_2023mar.onnx")
 
 DEFAULTS = {
     "block": 16,          # pixelation block size in px (bigger = chunkier)
@@ -68,10 +80,8 @@ DEFAULTS = {
     "saturation": 1.0,    # 0.0..2.0
     "warmth": 0.0,        # -50..50 (negative cooler, positive warmer)
     "gamma": 1.0,         # 0.4..2.5
-    "slim_on": False,
-    "slim_strength": 0.12,  # 0..0.30 horizontal pinch fraction (subtle)
     "hold_frames": 12,    # safety: keep last face box for N frames if lost
-    "min_confidence": 0.5,
+    "min_confidence": 0.6,  # YuNet score threshold (0..1)
     "pixelate_on": True,
 }
 
@@ -84,7 +94,6 @@ RANGES = {
     "saturation": (0.0, 2.0),
     "warmth": (-50.0, 50.0),
     "gamma": (0.4, 2.5),
-    "slim_strength": (0.0, 0.30),
 }
 
 
@@ -101,7 +110,8 @@ def load_settings():
                 s.update(json.load(f))
         except Exception as e:
             print(f"WARN: could not read settings.json ({e}); using defaults.")
-    return s
+    # Drop any stale keys from older versions (e.g. body-slim settings).
+    return {k: s.get(k, DEFAULTS[k]) for k in DEFAULTS}
 
 
 def save_settings(s):
@@ -156,7 +166,7 @@ def apply_lighting(frame, s, gamma_lut):
 
 
 def pixelate_region(frame, x0, y0, x1, y1, block):
-    """Pixelate only the rectangle [x0:x1, y0:y1] in-place-ish. Returns frame."""
+    """Pixelate only the rectangle [x0:x1, y0:y1]. Returns frame."""
     h, w = frame.shape[:2]
     x0 = max(0, min(w - 1, int(x0)))
     x1 = max(0, min(w, int(x1)))
@@ -174,65 +184,24 @@ def pixelate_region(frame, x0, y0, x1, y1, block):
     return frame
 
 
-def apply_body_slim(frame, mask, strength):
-    """
-    Experimental: horizontally pinch the person inward using a segmentation
-    mask so the silhouette looks slimmer. Subtle by design.
-
-    Approach: a per-row horizontal remap that squeezes sampling coordinates
-    toward each row's person-centroid, but the squeeze is *localized* by a
-    blurred influence mask -- full strength over the body, tapering to zero in
-    the background. We blend the squeeze into the identity map (no hard mask
-    composite), so the body narrows while the adjacent background gently
-    stretches to fill the vacated strip. This avoids both the "double edge"
-    ghost of the original silhouette and full-frame edge smearing.
-    """
-    if strength <= 0.0 or mask is None:
-        return frame
-
-    h, w = frame.shape[:2]
-    person = (mask > 0.5).astype(np.float32)
-    if person.max() <= 0.0:
-        return frame  # no person detected -> nothing to slim
-
-    # Localized influence: blur the person mask so the warp fades out into the
-    # background (giving room to stretch) and is ~1 across the body interior.
-    k = max(3, (w // 20) | 1)  # odd kernel ~5% of width
-    infl = cv2.GaussianBlur(person, (k, k), 0)
-    infl = np.clip(infl / max(infl.max(), 1e-6), 0.0, 1.0)
-
-    xs = np.tile(np.arange(w, dtype=np.float32), (h, 1))
-    # Per-row centroid of the person; fall back to frame center where empty.
-    row_sum = person.sum(axis=1)
-    col_idx = np.arange(w, dtype=np.float32)
-    cx = np.where(
-        row_sum > 0,
-        (person * col_idx).sum(axis=1) / np.maximum(row_sum, 1e-6),
-        w / 2.0,
-    ).astype(np.float32)[:, None]
-
-    # map_x = identity where infl=0, squeeze (slope 1+strength) where infl=1.
-    # Sampling further from center makes the rendered body appear narrower,
-    # and the taper lets the background stretch in instead of leaving a ghost.
-    map_x = xs + (strength * infl) * (xs - cx)
-    map_y = np.tile(np.arange(h, dtype=np.float32)[:, None], (1, w))
-
-    out = cv2.remap(
-        frame, map_x, map_y, interpolation=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_REPLICATE,
-    )
-    return out
-
-
-
 # ---------------------------------------------------------------------------
-# Face tracking with safety-biased "hold last position"
+# Face tracking with YuNet + safety-biased "hold last position"
 # ---------------------------------------------------------------------------
 
 class FaceTracker:
-    def __init__(self, min_confidence, hold_frames):
-        self.detector = mp.solutions.face_detection.FaceDetection(
-            model_selection=1, min_detection_confidence=min_confidence
+    def __init__(self, model_path, min_confidence, hold_frames):
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"YuNet model not found: {model_path}\n"
+                "The file 'face_detection_yunet_2023mar.onnx' must sit next to "
+                "pixelate_cam.py. Re-download it from the OpenCV Zoo if missing."
+            )
+        # Input size is set per-frame in detect(); (0,0) is a placeholder.
+        self.detector = cv2.FaceDetectorYN.create(
+            model_path, "", (0, 0),
+            score_threshold=float(min_confidence),
+            nms_threshold=0.3,
+            top_k=5000,
         )
         self.hold_frames = hold_frames
         self.last_boxes = []      # list of (x0,y0,x1,y1)
@@ -240,17 +209,13 @@ class FaceTracker:
 
     def detect(self, frame_bgr, padding):
         h, w = frame_bgr.shape[:2]
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        res = self.detector.process(rgb)
+        self.detector.setInputSize((w, h))
+        _, faces = self.detector.detect(frame_bgr)
         boxes = []
-        if res.detections:
-            for det in res.detections:
-                rb = det.location_data.relative_bounding_box
-                bx = rb.xmin * w
-                by = rb.ymin * h
-                bw = rb.width * w
-                bh = rb.height * h
-                # Safety padding around the detected face.
+        if faces is not None:
+            for f in faces:
+                # YuNet row: x, y, w, h, then 5 landmarks (10 vals), then score.
+                bx, by, bw, bh = float(f[0]), float(f[1]), float(f[2]), float(f[3])
                 px = bw * padding
                 py = bh * padding
                 x0 = bx - px
@@ -282,8 +247,7 @@ def draw_help(frame, s, fps, using_vcam):
         f"block[{s['block']}] pad[{s['padding']:.2f}]  "
         f"bright[{s['brightness']:+.0f}] contr[{s['contrast']:.2f}] "
         f"sat[{s['saturation']:.2f}] warm[{s['warmth']:+.0f}] gamma[{s['gamma']:.2f}]",
-        f"slim:{'ON' if s['slim_on'] else 'off'}[{s['slim_strength']:.2f}]   "
-        f"keys: [ ] pad:- = | bBcCsSwWgG | m , . | p peek | 0 reset | 5 save | q quit",
+        "keys: [ ] pad:- = | bBcCsSwWgG | p peek | 0 reset | 5 save | h help | q quit",
     ]
     y = 22
     for ln in lines:
@@ -312,6 +276,13 @@ def main():
     s = load_settings()
     gamma_lut = build_gamma_lut(s["gamma"])
 
+    # Face detector (fail early with a clear message if the model is missing).
+    try:
+        tracker = FaceTracker(MODEL_PATH, s["min_confidence"], s["hold_frames"])
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+
     # Open webcam.
     cap = cv2.VideoCapture(args.camera, cv2.CAP_DSHOW if os.name == "nt" else 0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
@@ -328,9 +299,6 @@ def main():
         sys.exit(1)
     H, W = probe.shape[:2]
     print(f"Camera {args.camera}: {W}x{H}")
-
-    tracker = FaceTracker(s["min_confidence"], s["hold_frames"])
-    segmenter = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
 
     # Virtual camera.
     vcam = None
@@ -351,10 +319,6 @@ def main():
                 print("      Running preview-only for now.")
                 vcam = None
 
-    show_help = True
-    t_prev = time.time()
-    fps = 0.0
-
     # Guard against a no-op combo: nothing to show and nowhere to send frames.
     if args.no_preview and vcam is None:
         print("ERROR: --no-preview was set but the virtual camera is not "
@@ -362,6 +326,10 @@ def main():
               "the virtual camera.")
         cap.release()
         sys.exit(1)
+
+    show_help = True
+    t_prev = time.time()
+    fps = 0.0
 
     print("Running. Focus the preview window and press 'h' for help, 'q' to quit.")
     while True:
@@ -375,12 +343,7 @@ def main():
         # 1) Lighting (full frame).
         frame = apply_lighting(frame, s, gamma_lut)
 
-        # 2) Body slim (experimental, optional).
-        if s["slim_on"] and s["slim_strength"] > 0:
-            seg = segmenter.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            frame = apply_body_slim(frame, seg.segmentation_mask, s["slim_strength"])
-
-        # 3) Face pixelation (faces only) -- done AFTER slim so faces stay covered.
+        # 2) Face pixelation (faces only).
         if s["pixelate_on"]:
             boxes = tracker.detect(frame, s["padding"])
             for (x0, y0, x1, y1) in boxes:
@@ -393,12 +356,12 @@ def main():
         if dt > 0:
             fps = 0.9 * fps + 0.1 * (1.0 / dt)
 
-        # 4) Output to virtual cam.
+        # 3) Output to virtual cam.
         if vcam is not None:
             vcam.send(frame)
             vcam.sleep_until_next_frame()
 
-        # 5) Preview.
+        # 4) Preview.
         if not args.no_preview:
             disp = frame.copy()
             if show_help:
@@ -443,14 +406,8 @@ def main():
             elif key == ord('G'):
                 s["gamma"] = round(clamp("gamma", s["gamma"] + 0.05), 2)
                 gamma_lut = build_gamma_lut(s["gamma"])
-            elif key == ord('m'):
-                s["slim_on"] = not s["slim_on"]
-            elif key == ord(','):
-                s["slim_strength"] = round(clamp("slim_strength", s["slim_strength"] - 0.02), 2)
-            elif key == ord('.'):
-                s["slim_strength"] = round(clamp("slim_strength", s["slim_strength"] + 0.02), 2)
             elif key == ord('0'):
-                # Reset only the lighting adjustments; keep pixelation/slim setup.
+                # Reset only the lighting adjustments; keep pixelation setup.
                 for k in ("brightness", "contrast", "saturation", "warmth", "gamma"):
                     s[k] = DEFAULTS[k]
                 gamma_lut = build_gamma_lut(s["gamma"])

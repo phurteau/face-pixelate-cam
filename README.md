@@ -5,32 +5,34 @@ body and background stay untouched - and publishes the result to the
 **OBS / Streamlabs Virtual Camera**, so you can pick it as a camera inside
 Streamlabs Desktop.
 
-It also includes live **lighting** controls and an **experimental body‑slim**
-effect.
+It also includes live **lighting** controls (brightness, contrast, saturation,
+warmth, gamma).
 
 ---
 
 ## What it does
 
 - 🟦 **Face pixelation (faces only).** Detection runs on **every frame** with
-  MediaPipe, so the pixel block **follows your face** anywhere in the room and
-  **resizes** as you move closer/farther. Handles **multiple faces**.
+  OpenCV's **YuNet** face detector, so the pixel block **follows your face**
+  anywhere in the room and **resizes** as you move closer/farther. Handles
+  **multiple faces**.
 - 🛡️ **Safety‑biased tracking.** Boxes are padded and a "hold last position"
   buffer keeps faces covered during **fast motion** or **profile angles** so a
   frame with an exposed face is very unlikely.
 - 💡 **Lighting:** brightness, contrast, saturation, warmth (white balance),
   gamma - all adjustable live.
-- 🧍 **Body slim (experimental, off by default):** subtle horizontal squeeze of
-  the person using selfie segmentation. Keep it gentle; pushing it hard looks
-  fake.
 
 ---
 
 ## Requirements on your personal PC
 
-1. **Python 3.10–3.12** (64‑bit). Install from
+1. **Python 3.9–3.14** (64‑bit). Install from
    <https://www.python.org/downloads/> and tick **"Add Python to PATH"**.
-2. **OBS or Streamlabs Virtual Camera driver.** This ships with Streamlabs
+   Any current version works - including **3.13 / 3.14** - because face
+   detection uses OpenCV YuNet (prebuilt wheels, no compiler, no MediaPipe).
+2. **The bundled model file** `face_detection_yunet_2023mar.onnx` must stay in
+   the folder next to `pixelate_cam.py` (it's ~230 KB and ships with the app).
+3. **OBS or Streamlabs Virtual Camera driver.** This ships with Streamlabs
    Desktop and OBS. Since you already use Streamlabs, you're covered - the app
    sends video *through* that driver. (A folder/.exe cannot carry the driver.)
 
@@ -79,8 +81,6 @@ effect.
 | `s` / `S` | Saturation down / up |
 | `w` / `W` | Warmth cooler / warmer |
 | `g` / `G` | Gamma down / up |
-| `m` | Toggle body slim (experimental) |
-| `,` / `.` | Slim intensity down / up |
 | `p` | Toggle pixelation on/off (panic peek) |
 | `0` | Reset lighting to neutral |
 | `5` / `9` | Save / reload `settings.json` |
@@ -98,11 +98,12 @@ file to return to defaults.
 - **Virtual camera won't start** → open Streamlabs/OBS once to register the
   driver, then rerun. Confirm you're on 64‑bit Python.
 - **Face flickers when I turn fully sideways** → increase padding (`=`) or the
-  hold window (`hold_frames` in `settings.json`). MediaPipe is weakest on full
-  profiles.
-- **Body slim looks warped** → it's experimental; lower intensity (`,`) or turn
-  it off (`m`). Subtle is the intent.
-- **Low frame rate** → turn body slim off, lower resolution
+  hold window (`hold_frames` in `settings.json`). Face detectors are weakest on
+  full profiles; the padding + hold buffer cover the gap.
+- **"YuNet model not found"** → the file `face_detection_yunet_2023mar.onnx`
+  must be in the same folder as `pixelate_cam.py`. Re‑download it from the
+  OpenCV Zoo if it's missing.
+- **Low frame rate** → lower the resolution
   (`run.bat --width 960 --height 540`).
 
 ---
@@ -127,10 +128,10 @@ Program Files, no Start‑menu entries). To remove it:
 
 ## How the "faces only" part works
 
-Each frame, MediaPipe returns bounding boxes for detected faces. The app
-pixelates **only those rectangles** (down‑scale then nearest‑neighbor up‑scale),
-copying the blocks back over the face region. Every other pixel is the original
-frame, so your body and background are unchanged.
+Each frame, OpenCV's YuNet detector returns bounding boxes for detected faces.
+The app pixelates **only those rectangles** (down‑scale then nearest‑neighbor
+up‑scale), copying the blocks back over the face region. Every other pixel is
+the original frame, so your body and background are unchanged.
 
 ---
 
