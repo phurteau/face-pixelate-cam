@@ -240,6 +240,36 @@ class FaceTracker:
 # Main loop
 # ---------------------------------------------------------------------------
 
+# Small clickable UI button in the preview's top-left corner (x, y, w, h).
+# Clicking it toggles the info overlay. Drawn ONLY on the preview, never on the
+# frame sent to the virtual camera, so your stream stays clean.
+UI_BUTTON = (10, 10, 44, 32)
+
+
+def point_in_button(x, y):
+    bx, by, bw, bh = UI_BUTTON
+    return bx <= x <= bx + bw and by <= y <= by + bh
+
+
+def draw_button(frame, show_help):
+    """Draw the little hide/unhide button in the corner of the preview."""
+    x, y, w, h = UI_BUTTON
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x, y), (x + w, y + h), (35, 35, 35), -1)
+    cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+    cv2.rectangle(frame, (x, y), (x + w, y + h), (210, 210, 210), 1)
+    if show_help:
+        # Overlay visible -> show an "X" (click to hide the UI).
+        cv2.line(frame, (x + 13, y + 10), (x + w - 13, y + h - 10), (235, 235, 235), 2, cv2.LINE_AA)
+        cv2.line(frame, (x + w - 13, y + 10), (x + 13, y + h - 10), (235, 235, 235), 2, cv2.LINE_AA)
+    else:
+        # Overlay hidden -> show a "hamburger" (click to show the UI).
+        for i in range(3):
+            yy = y + 11 + i * 5
+            cv2.line(frame, (x + 12, yy), (x + w - 12, yy), (235, 235, 235), 2, cv2.LINE_AA)
+    return frame
+
+
 def draw_help(frame, s, fps, using_vcam):
     lines = [
         f"FPS {fps:4.1f}  | pixelate:{'ON' if s['pixelate_on'] else 'OFF'}  "
@@ -247,9 +277,9 @@ def draw_help(frame, s, fps, using_vcam):
         f"block[{s['block']}] pad[{s['padding']:.2f}]  "
         f"bright[{s['brightness']:+.0f}] contr[{s['contrast']:.2f}] "
         f"sat[{s['saturation']:.2f}] warm[{s['warmth']:+.0f}] gamma[{s['gamma']:.2f}]",
-        "keys: [ ] pad:- = | bBcCsSwWgG | p peek | 0 reset | 5 save | h help | q quit",
+        "keys: [ ] pad:- = | bBcCsSwWgG | p peek | 0 reset | 5 save | h/btn hide | q quit",
     ]
-    y = 22
+    y = 60  # start below the corner button
     for ln in lines:
         cv2.putText(frame, ln, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                     (0, 0, 0), 3, cv2.LINE_AA)
@@ -315,7 +345,11 @@ def main():
             except Exception as e:
                 print("WARN: could not start virtual camera:")
                 print(f"      {e}")
-                print("      Is the OBS/Streamlabs Virtual Camera driver installed?")
+                print("      This app publishes through the OBS Studio virtual")
+                print("      camera. Install OBS Studio (https://obsproject.com),")
+                print("      open it once, click Start Virtual Camera then Stop,")
+                print("      close OBS, and re-run. (Streamlabs' own virtual cam")
+                print("      is a different device and will NOT work here.)")
                 print("      Running preview-only for now.")
                 vcam = None
 
@@ -327,102 +361,121 @@ def main():
         cap.release()
         sys.exit(1)
 
-    show_help = True
+    WINDOW = "face-pixelate-cam (preview)"
+    # Mutable UI state shared with the mouse callback. Overlay starts HIDDEN so
+    # the preview is clean; only the small corner button shows.
+    ui = {"show_overlay": False}
+
+    def on_mouse(event, mx, my, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN and point_in_button(mx, my):
+            ui["show_overlay"] = not ui["show_overlay"]
+
+    if not args.no_preview:
+        cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
+        cv2.setMouseCallback(WINDOW, on_mouse)
+
     t_prev = time.time()
     fps = 0.0
 
-    print("Running. Focus the preview window and press 'h' for help, 'q' to quit.")
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            print("WARN: dropped frame")
-            continue
-        if args.mirror:
-            frame = cv2.flip(frame, 1)
-
-        # 1) Lighting (full frame).
-        frame = apply_lighting(frame, s, gamma_lut)
-
-        # 2) Face pixelation (faces only).
-        if s["pixelate_on"]:
-            boxes = tracker.detect(frame, s["padding"])
-            for (x0, y0, x1, y1) in boxes:
-                pixelate_region(frame, x0, y0, x1, y1, s["block"])
-
-        # FPS meter.
-        now = time.time()
-        dt = now - t_prev
-        t_prev = now
-        if dt > 0:
-            fps = 0.9 * fps + 0.1 * (1.0 / dt)
-
-        # 3) Output to virtual cam.
-        if vcam is not None:
-            vcam.send(frame)
-            vcam.sleep_until_next_frame()
-
-        # 4) Preview.
-        if not args.no_preview:
-            disp = frame.copy()
-            if show_help:
-                draw_help(disp, s, fps, vcam is not None)
-            cv2.imshow("face-pixelate-cam (preview)", disp)
-            key = cv2.waitKey(1) & 0xFF
-            if key == 255:
+    print("Running. Close the preview window (X) or press 'q' to quit.")
+    print("Click the corner button (or press 'h') to show/hide the overlay.")
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                print("WARN: dropped frame")
                 continue
-            if key in (ord('q'), 27):
-                break
-            elif key == ord('h'):
-                show_help = not show_help
-            elif key == ord('p'):
-                s["pixelate_on"] = not s["pixelate_on"]
-            elif key == ord('['):
-                s["block"] = int(clamp("block", s["block"] - 2))
-            elif key == ord(']'):
-                s["block"] = int(clamp("block", s["block"] + 2))
-            elif key == ord('-'):
-                s["padding"] = round(clamp("padding", s["padding"] - 0.05), 2)
-            elif key == ord('='):
-                s["padding"] = round(clamp("padding", s["padding"] + 0.05), 2)
-            elif key == ord('b'):
-                s["brightness"] = clamp("brightness", s["brightness"] - 5)
-            elif key == ord('B'):
-                s["brightness"] = clamp("brightness", s["brightness"] + 5)
-            elif key == ord('c'):
-                s["contrast"] = round(clamp("contrast", s["contrast"] - 0.05), 2)
-            elif key == ord('C'):
-                s["contrast"] = round(clamp("contrast", s["contrast"] + 0.05), 2)
-            elif key == ord('s'):
-                s["saturation"] = round(clamp("saturation", s["saturation"] - 0.05), 2)
-            elif key == ord('S'):
-                s["saturation"] = round(clamp("saturation", s["saturation"] + 0.05), 2)
-            elif key == ord('w'):
-                s["warmth"] = clamp("warmth", s["warmth"] - 3)
-            elif key == ord('W'):
-                s["warmth"] = clamp("warmth", s["warmth"] + 3)
-            elif key == ord('g'):
-                s["gamma"] = round(clamp("gamma", s["gamma"] - 0.05), 2)
-                gamma_lut = build_gamma_lut(s["gamma"])
-            elif key == ord('G'):
-                s["gamma"] = round(clamp("gamma", s["gamma"] + 0.05), 2)
-                gamma_lut = build_gamma_lut(s["gamma"])
-            elif key == ord('0'):
-                # Reset only the lighting adjustments; keep pixelation setup.
-                for k in ("brightness", "contrast", "saturation", "warmth", "gamma"):
-                    s[k] = DEFAULTS[k]
-                gamma_lut = build_gamma_lut(s["gamma"])
-            elif key == ord('5'):   # save settings
-                save_settings(s)
-            elif key == ord('9'):   # reload settings from disk
-                s = load_settings()
-                gamma_lut = build_gamma_lut(s["gamma"])
+            if args.mirror:
+                frame = cv2.flip(frame, 1)
 
-    cap.release()
-    if vcam is not None:
-        vcam.close()
-    if not args.no_preview:
-        cv2.destroyAllWindows()
-    print("Stopped.")
+            # 1) Lighting (full frame).
+            frame = apply_lighting(frame, s, gamma_lut)
+
+            # 2) Face pixelation (faces only).
+            if s["pixelate_on"]:
+                boxes = tracker.detect(frame, s["padding"])
+                for (x0, y0, x1, y1) in boxes:
+                    pixelate_region(frame, x0, y0, x1, y1, s["block"])
+
+            # FPS meter.
+            now = time.time()
+            dt = now - t_prev
+            t_prev = now
+            if dt > 0:
+                fps = 0.9 * fps + 0.1 * (1.0 / dt)
+
+            # 3) Output to virtual cam.
+            if vcam is not None:
+                vcam.send(frame)
+                vcam.sleep_until_next_frame()
+
+            # 4) Preview.
+            if not args.no_preview:
+                disp = frame.copy()
+                if ui["show_overlay"]:
+                    draw_help(disp, s, fps, vcam is not None)
+                draw_button(disp, ui["show_overlay"])
+                cv2.imshow(WINDOW, disp)
+                key = cv2.waitKey(1) & 0xFF
+
+                # Quit if the window was closed via its X button.
+                if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+                    break
+                if key in (ord('q'), 27):
+                    break
+                elif key == ord('h'):
+                    ui["show_overlay"] = not ui["show_overlay"]
+                elif key == ord('p'):
+                    s["pixelate_on"] = not s["pixelate_on"]
+                elif key == ord('['):
+                    s["block"] = int(clamp("block", s["block"] - 2))
+                elif key == ord(']'):
+                    s["block"] = int(clamp("block", s["block"] + 2))
+                elif key == ord('-'):
+                    s["padding"] = round(clamp("padding", s["padding"] - 0.05), 2)
+                elif key == ord('='):
+                    s["padding"] = round(clamp("padding", s["padding"] + 0.05), 2)
+                elif key == ord('b'):
+                    s["brightness"] = clamp("brightness", s["brightness"] - 5)
+                elif key == ord('B'):
+                    s["brightness"] = clamp("brightness", s["brightness"] + 5)
+                elif key == ord('c'):
+                    s["contrast"] = round(clamp("contrast", s["contrast"] - 0.05), 2)
+                elif key == ord('C'):
+                    s["contrast"] = round(clamp("contrast", s["contrast"] + 0.05), 2)
+                elif key == ord('s'):
+                    s["saturation"] = round(clamp("saturation", s["saturation"] - 0.05), 2)
+                elif key == ord('S'):
+                    s["saturation"] = round(clamp("saturation", s["saturation"] + 0.05), 2)
+                elif key == ord('w'):
+                    s["warmth"] = clamp("warmth", s["warmth"] - 3)
+                elif key == ord('W'):
+                    s["warmth"] = clamp("warmth", s["warmth"] + 3)
+                elif key == ord('g'):
+                    s["gamma"] = round(clamp("gamma", s["gamma"] - 0.05), 2)
+                    gamma_lut = build_gamma_lut(s["gamma"])
+                elif key == ord('G'):
+                    s["gamma"] = round(clamp("gamma", s["gamma"] + 0.05), 2)
+                    gamma_lut = build_gamma_lut(s["gamma"])
+                elif key == ord('0'):
+                    # Reset only the lighting adjustments; keep pixelation setup.
+                    for k in ("brightness", "contrast", "saturation", "warmth", "gamma"):
+                        s[k] = DEFAULTS[k]
+                    gamma_lut = build_gamma_lut(s["gamma"])
+                elif key == ord('5'):   # save settings
+                    save_settings(s)
+                elif key == ord('9'):   # reload settings from disk
+                    s = load_settings()
+                    gamma_lut = build_gamma_lut(s["gamma"])
+    except KeyboardInterrupt:
+        print("\nInterrupted (Ctrl+C).")
+    finally:
+        cap.release()
+        if vcam is not None:
+            vcam.close()
+        if not args.no_preview:
+            cv2.destroyAllWindows()
+        print("Stopped.")
 
 
 if __name__ == "__main__":

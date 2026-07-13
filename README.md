@@ -32,12 +32,15 @@ warmth, gamma).
    detection uses OpenCV YuNet (prebuilt wheels, no compiler, no MediaPipe).
 2. **The bundled model file** `face_detection_yunet_2023mar.onnx` must stay in
    the folder next to `pixelate_cam.py` (it's ~230 KB and ships with the app).
-3. **OBS or Streamlabs Virtual Camera driver.** This ships with Streamlabs
-   Desktop and OBS. Since you already use Streamlabs, you're covered - the app
-   sends video *through* that driver. (A folder/.exe cannot carry the driver.)
+3. **OBS Studio virtual camera driver** (this is how the app publishes video).
+   ⚠️ **You must install [OBS Studio](https://obsproject.com) even though you
+   use Streamlabs** - this app sends frames through the *OBS* virtual camera,
+   and Streamlabs' own virtual camera is a different device it can't use.
+   One‑time setup: install OBS → open it → click **Start Virtual Camera** then
+   **Stop Virtual Camera** → close OBS. That registers the driver system‑wide.
 
-> If you ever see `could not start virtual camera`, open Streamlabs/OBS once
-> (which registers the driver) and try again.
+> If you ever see `could not start virtual camera`, install **OBS Studio** and
+> do the one‑time Start/Stop Virtual Camera step above, then try again.
 
 ---
 
@@ -49,12 +52,13 @@ warmth, gamma).
 
 ## Run
 
-1. Double‑click **`run.bat`**. A **preview window** opens and the **virtual
-   camera** starts.
+1. Double‑click **`run.bat`**. A **preview window** opens (clean, with just a
+   small button in the top‑left) and the **virtual camera** starts.
 2. In **Streamlabs Desktop**: **+ (Add Source) → Video Capture Device → Add
    → pick "OBS Virtual Camera"**.
-3. Move around - faces stay pixelated. Close the preview window (press **q**) to
-   stop.
+3. Move around - faces stay pixelated. **To stop:** close the preview window
+   (its **X**) or press **q**. (The small corner button shows/hides the
+   settings overlay - it does not quit.)
 
 ### Handy launch options
 
@@ -71,9 +75,13 @@ warmth, gamma).
 
 ## Hotkeys (focus the preview window)
 
+The overlay is **hidden by default** for a clean preview. Click the small
+**corner button** (top‑left) or press **`h`** to show/hide it.
+
 | Key | Action |
 |---|---|
-| `q` / `Esc` | Quit |
+| `q` / `Esc` / close window (X) | Quit |
+| `h` / corner button | Show/hide the settings overlay |
 | `[` / `]` | Pixel block size - smaller / larger blocks |
 | `-` / `=` | Face padding - less / more safety margin |
 | `b` / `B` | Brightness down / up |
@@ -84,7 +92,6 @@ warmth, gamma).
 | `p` | Toggle pixelation on/off (panic peek) |
 | `0` | Reset lighting to neutral |
 | `5` / `9` | Save / reload `settings.json` |
-| `h` | Toggle the on‑screen help overlay |
 
 Your tweaks persist to **`settings.json`** (press **5** to save). Delete that
 file to return to defaults.
@@ -93,10 +100,19 @@ file to return to defaults.
 
 ## Troubleshooting
 
+- **Streamlabs doesn't list the camera** → it appears as **"OBS Virtual
+  Camera"**, not "face-pixelate-cam". If it's missing entirely, the app didn't
+  publish - check the console for `could not start virtual camera`. The fix is
+  almost always installing **OBS Studio** and doing the one‑time Start/Stop
+  Virtual Camera step (see Requirements). Also make sure the Python app is
+  **still running** - the virtual camera only exists while it's open.
 - **"could not open camera index 0"** → another app is using the webcam, or the
   index is wrong. Close other apps or try `run.bat --camera 1`.
-- **Virtual camera won't start** → open Streamlabs/OBS once to register the
-  driver, then rerun. Confirm you're on 64‑bit Python.
+- **Virtual camera won't start** → install **OBS Studio**, open it once, click
+  Start Virtual Camera then Stop, close OBS, and rerun. Confirm 64‑bit Python.
+- **The preview window won't close / reopens** → press **q** or click the
+  window's **X** (fixed in the current version). You can also close the black
+  console window, or Ctrl+C in it.
 - **Face flickers when I turn fully sideways** → increase padding (`=`) or the
   hold window (`hold_frames` in `settings.json`). Face detectors are weakest on
   full profiles; the padding + hold buffer cover the gap.

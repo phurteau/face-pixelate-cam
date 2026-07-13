@@ -40,6 +40,14 @@ if "%PYMINOR%"=="" goto :badver
 if %PYMINOR% LSS 9 goto :badver
 
 echo Using: %PY% (Python %PYMAJOR%.%PYMINOR%)
+
+REM Remove any leftover/broken .venv from a previous failed run so we always
+REM build a clean one (a half-created venv is a common cause of pip failures).
+if exist ".venv" (
+    echo Removing existing .venv for a clean install ...
+    rmdir /s /q ".venv"
+)
+
 echo Creating virtual environment in .venv ...
 %PY% -m venv .venv
 if %errorlevel% neq 0 (
@@ -52,11 +60,23 @@ echo Upgrading pip ...
 ".venv\Scripts\python.exe" -m pip install --upgrade pip
 
 echo Installing dependencies (this can take a few minutes) ...
-".venv\Scripts\python.exe" -m pip install -r requirements.txt
-if %errorlevel% neq 0 (
+echo (full output is also saved to setup-log.txt)
+".venv\Scripts\python.exe" -m pip install -r requirements.txt > "%~dp0setup-log.txt" 2>&1
+set "PIPRESULT=%errorlevel%"
+type "%~dp0setup-log.txt"
+if %PIPRESULT% neq 0 (
     echo.
-    echo ERROR: dependency install failed. Scroll up for the pip error.
-    echo If pip could not find a wheel, make sure you are on 64-bit Python.
+    echo ============================================================
+    echo  ERROR: dependency install failed.
+    echo  The FULL pip error is shown above and saved in:
+    echo     %~dp0setup-log.txt
+    echo  Share that file and the exact cause can be pinpointed.
+    echo.
+    echo  Common causes when requirements.txt is correct:
+    echo   - Corporate/AV proxy or SSL inspection blocking PyPI
+    echo   - No internet at install time
+    echo   - 32-bit Python (this needs 64-bit)
+    echo ============================================================
     pause
     exit /b 1
 )
