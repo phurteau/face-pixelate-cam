@@ -107,6 +107,24 @@ file to return to defaults.
 
 ---
 
+## Uninstall
+
+This app is **portable** - nothing is installed system‑wide (no registry, no
+Program Files, no Start‑menu entries). To remove it:
+
+- **Easiest:** just delete the whole `face-pixelate-cam` folder.
+- **Or run `uninstall.bat`**, which:
+  1. Removes generated files (`.venv`, `settings.json`, `__pycache__`,
+     `build`, `dist`, `*.spec`) - resetting the folder to just the source.
+  2. Then asks if you also want to **delete the entire folder** (`y` = full
+     removal, including itself).
+
+> `uninstall.bat` does **not** remove the OBS/Streamlabs **Virtual Camera
+> driver** - that belongs to Streamlabs/OBS and other apps may use it. Remove
+> it from Streamlabs/OBS if you no longer want it.
+
+---
+
 ## How the "faces only" part works
 
 Each frame, MediaPipe returns bounding boxes for detected faces. The app
