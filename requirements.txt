@@ -1,0 +1,8 @@
+# NOTE on OpenCV: mediapipe depends on opencv-contrib-python. Do NOT also list
+# opencv-python here -- installing both puts two copies of the cv2 module in the
+# same environment and causes version conflicts on some PCs. We rely on the
+# contrib build (it is a superset and provides everything this app uses).
+opencv-contrib-python==4.10.0.84
+mediapipe==0.10.14
+pyvirtualcam==0.11.0
+numpy==1.26.4
