@@ -301,6 +301,10 @@ def main():
                     help="No preview window (headless; virtual cam only).")
     ap.add_argument("--mirror", action="store_true",
                     help="Mirror the image (selfie view).")
+    ap.add_argument("--clean", action="store_true",
+                    help="Bare pixelated video only -- no button/overlay. Ideal "
+                         "for capturing this window in OBS/Streamlabs via "
+                         "'Window Capture' (no virtual camera needed).")
     args = ap.parse_args()
 
     s = load_settings()
@@ -377,8 +381,12 @@ def main():
     t_prev = time.time()
     fps = 0.0
 
-    print("Running. Close the preview window (X) or press 'q' to quit.")
-    print("Click the corner button (or press 'h') to show/hide the overlay.")
+    print("Running. Close the window (X) or press 'q' to quit.")
+    if args.clean:
+        print("CLEAN mode: bare video for Window Capture. Press 'h' (or click the")
+        print("top-left corner) to summon the settings overlay, 'h' again to hide.")
+    else:
+        print("Click the corner button (or press 'h') to show/hide the overlay.")
     try:
         while True:
             ok, frame = cap.read()
@@ -412,9 +420,15 @@ def main():
             # 4) Preview.
             if not args.no_preview:
                 disp = frame.copy()
+                # Clean mode starts bare (no button, no overlay) so the captured
+                # window is uncluttered. Pressing 'h' -- or clicking the top-left
+                # corner -- still summons the full controls when you need them;
+                # press 'h' again to go bare for streaming.
                 if ui["show_overlay"]:
                     draw_help(disp, s, fps, vcam is not None)
-                draw_button(disp, ui["show_overlay"])
+                    draw_button(disp, ui["show_overlay"])
+                elif not args.clean:
+                    draw_button(disp, ui["show_overlay"])
                 cv2.imshow(WINDOW, disp)
                 key = cv2.waitKey(1) & 0xFF
 

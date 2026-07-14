@@ -1,9 +1,11 @@
 # face-pixelate-cam
 
 A portable Windows app that **pixelates only faces** in your webcam feed - the
-body and background stay untouched - and publishes the result to the
-**OBS / Streamlabs Virtual Camera**, so you can pick it as a camera inside
-Streamlabs Desktop.
+body and background stay untouched - so you can bring a face‑blurred camera into
+**OBS or Streamlabs**. Get it on screen two ways:
+
+- **Window Capture** (easiest - capture the app's window; no extra install), or
+- **Virtual camera** (appears as a camera device; needs the OBS virtual‑cam driver).
 
 It also includes live **lighting** controls (brightness, contrast, saturation,
 warmth, gamma).
@@ -32,15 +34,15 @@ warmth, gamma).
    detection uses OpenCV YuNet (prebuilt wheels, no compiler, no MediaPipe).
 2. **The bundled model file** `face_detection_yunet_2023mar.onnx` must stay in
    the folder next to `pixelate_cam.py` (it's ~230 KB and ships with the app).
-3. **OBS Studio virtual camera driver** (this is how the app publishes video).
-   ⚠️ **You must install [OBS Studio](https://obsproject.com) even though you
-   use Streamlabs** - this app sends frames through the *OBS* virtual camera,
-   and Streamlabs' own virtual camera is a different device it can't use.
-   One‑time setup: install OBS → open it → click **Start Virtual Camera** then
-   **Stop Virtual Camera** → close OBS. That registers the driver system‑wide.
-
-> If you ever see `could not start virtual camera`, install **OBS Studio** and
-> do the one‑time Start/Stop Virtual Camera step above, then try again.
+3. **A way to get the video into your streaming app.** There are two options -
+   **Window Capture is the easy one and needs no extra install:**
+   - **Window Capture (recommended):** OBS and Streamlabs can capture the app's
+     own window directly. **Nothing else to install.** ← start here
+   - **Virtual camera (optional):** to make it appear as a *camera device*, you
+     must install [OBS Studio](https://obsproject.com), open it once, click
+     **Start Virtual Camera** then **Stop Virtual Camera**, and close OBS (this
+     registers the driver). Streamlabs' own virtual camera is a different device
+     the app can't use. If you don't need a "camera", skip this entirely.
 
 ---
 
@@ -50,26 +52,56 @@ warmth, gamma).
 2. Double‑click **`setup.bat`**. It creates a local `.venv` and installs
    everything (takes a few minutes the first time).
 
-## Run
+## Run - Method A: Window Capture (recommended, no driver needed)
 
-1. Double‑click **`run.bat`**. A **preview window** opens (clean, with just a
-   small button in the top‑left) and the **virtual camera** starts.
-2. In **Streamlabs Desktop**: **+ (Add Source) → Video Capture Device → Add
-   → pick "OBS Virtual Camera"**.
-3. Move around - faces stay pixelated. **To stop:** close the preview window
-   (its **X**) or press **q**. (The small corner button shows/hides the
-   settings overlay - it does not quit.)
+1. Double‑click **`run-clean.bat`**. A window opens showing your **bare
+   pixelated video** - no buttons or text, so it's clean to capture.
+2. In **OBS or Streamlabs**: **+ (Add Source) → Window Capture → Add new →**
+   pick the window titled **"face-pixelate-cam (preview)"**.
+   - If the capture looks black, set the Window Capture's **Capture Method** to
+     **"Windows 10 (1903 and up)"** (Streamlabs/OBS have this dropdown).
+3. Resize/crop the source in your scene as usual. Faces stay pixelated as you
+   move.
+
+**To stop:** close the window (its **X**), press **q** / **Esc**, or close the
+black console window.
+
+**To adjust settings (block size, brightness, etc.) in clean mode:** press
+**`h`** (or click the top‑left corner) to summon the controls overlay, change
+things with the hotkeys below, then press **`h`** again to go bare. Tip: press
+**`5`** to save your settings - `run-clean.bat` will reuse them next time, so you
+can configure once and always stream bare.
+
+> Keep the app window **open and not minimized** while streaming. You can move
+> it off to the side of your screen; Window Capture still grabs it. (While the
+> overlay is showing, your capture would show it too - so hide it with `h`
+> before going live, or adjust during setup.)
+
+## Run - Method B: Virtual camera (appears as a "camera")
+
+1. Do the one‑time **OBS Studio** step in Requirements #3 above.
+2. Double‑click **`run.bat`**. A preview window opens (with a small corner
+   button) and the **virtual camera** starts. The console should print
+   `Virtual camera: OBS Virtual Camera`.
+3. In **Streamlabs**: **+ (Add Source) → Video Capture Device → Add → pick
+   "OBS Virtual Camera"**. Keep the app running the whole time.
+4. **To stop:** close the preview window (**X**) or press **q**. (The corner
+   button shows/hides the settings overlay - it does not quit.)
+
+> Not seeing the camera? Run **`diagnose.bat`** - it tells you exactly why the
+> virtual camera won't start and saves the result to `diagnose-log.txt`.
 
 ### Handy launch options
 
 | Command | Effect |
 |---|---|
-| `run.bat` | Default (camera 0, 1280×720). |
-| `run.bat --camera 1` | Use a different webcam (try 1, 2, …). |
-| `run.bat --mirror` | Selfie/mirror view. |
+| `run-clean.bat` | **Window Capture mode** - bare video, no overlay, no virtual cam. |
+| `run.bat` | Virtual‑camera mode (camera 0, 1280×720). |
+| `run.bat --camera 1` / `run-clean.bat --camera 1` | Use a different webcam (try 1, 2, …). |
+| `run-clean.bat --mirror` | Selfie/mirror view. |
 | `run.bat --width 1920 --height 1080 --fps 30` | Force a resolution. |
 | `run.bat --no-vcam` | Preview only (test without the virtual cam). |
-| `run.bat --no-preview` | Headless (virtual cam only, no window). |
+| `run.bat --clean` | Bare video but keep other defaults. |
 
 ---
 
@@ -100,16 +132,21 @@ file to return to defaults.
 
 ## Troubleshooting
 
-- **Streamlabs doesn't list the camera** → it appears as **"OBS Virtual
-  Camera"**, not "face-pixelate-cam". If it's missing entirely, the app didn't
-  publish - check the console for `could not start virtual camera`. The fix is
-  almost always installing **OBS Studio** and doing the one‑time Start/Stop
-  Virtual Camera step (see Requirements). Also make sure the Python app is
-  **still running** - the virtual camera only exists while it's open.
+- **Can't get it to show as a camera in OBS/Streamlabs** → easiest fix: don't
+  use the virtual camera at all. Run **`run-clean.bat`** and add a **Window
+  Capture** source pointed at the "face-pixelate-cam (preview)" window. No
+  driver needed. (Use the virtual camera only if you specifically want a
+  *camera device*.)
+- **Streamlabs doesn't list the camera** (virtual‑cam method) → it appears as
+  **"OBS Virtual Camera"**, not "face-pixelate-cam". If it's missing entirely,
+  run **`diagnose.bat`** - it pinpoints why. Usual cause: OBS Studio's virtual
+  camera driver isn't registered (install OBS, Start/Stop Virtual Camera once).
+  Also make sure the app is **still running** - the camera only exists while it
+  is open.
+- **Window Capture shows black** → in the source's properties set **Capture
+  Method → "Windows 10 (1903 and up)"**, and don't minimize the app window.
 - **"could not open camera index 0"** → another app is using the webcam, or the
-  index is wrong. Close other apps or try `run.bat --camera 1`.
-- **Virtual camera won't start** → install **OBS Studio**, open it once, click
-  Start Virtual Camera then Stop, close OBS, and rerun. Confirm 64‑bit Python.
+  index is wrong. Close other apps or try `run-clean.bat --camera 1`.
 - **The preview window won't close / reopens** → press **q** or click the
   window's **X** (fixed in the current version). You can also close the black
   console window, or Ctrl+C in it.

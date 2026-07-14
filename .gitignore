@@ -4,8 +4,9 @@
 # User settings (personal tweaks; optional to keep local)
 settings.json
 
-# Setup diagnostic log
+# Setup / diagnostic logs
 setup-log.txt
+diagnose-log.txt
 
 # PyInstaller build output
 build/
