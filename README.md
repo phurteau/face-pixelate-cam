@@ -12,6 +12,20 @@ warmth, gamma).
 
 ---
 
+## Download
+
+**[⬇️ Download the latest release (face-pixelate-cam.zip)](https://github.com/phurteau/face-pixelate-cam/releases/latest)**
+
+1. Download and **extract** the zip.
+2. Double‑click **`setup.bat`** once (needs Python 3.9–3.14, 64‑bit).
+3. Double‑click **`run-clean.bat`** and add a **Window Capture** source in
+   OBS/Streamlabs (see below).
+
+*(Alternatively, use the green **Code ▸ Download ZIP** button for the latest
+`main`, or `git clone` the repo.)*
+
+---
+
 ## What it does
 
 - 🟦 **Face pixelation (faces only).** Detection runs on **every frame** with
