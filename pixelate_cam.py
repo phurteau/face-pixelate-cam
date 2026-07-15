@@ -104,8 +104,8 @@ DEFAULTS = {
     "saturation": 1.0,    # 0.0..2.0
     "warmth": 0.0,        # -50..50 (negative cooler, positive warmer)
     "gamma": 1.0,         # 0.4..2.5
-    "hold_frames": 12,    # safety: keep last face box for N frames if lost
-    "min_confidence": 0.6,  # YuNet score threshold (0..1)
+    "hold_frames": 20,    # safety: keep last face box for N frames if lost
+    "min_confidence": 0.5,  # YuNet score threshold (0..1); lower = catch more
     "pixelate_on": True,
 }
 
@@ -230,22 +230,69 @@ class FaceTracker:
         self.hold_frames = hold_frames
         self.last_boxes = []      # list of (x0,y0,x1,y1)
         self.lost_count = 0
+        # Reflect-border fraction added around the frame before detection so
+        # faces cut off at the edge are still found.
+        self.detect_pad = 0.25
+        # How close (fraction of face size) a face must be to an edge before we
+        # extend its pixelation box out past that edge.
+        self.edge_margin = 0.15
 
     def detect(self, frame_bgr, padding):
         h, w = frame_bgr.shape[:2]
-        self.detector.setInputSize((w, h))
-        _, faces = self.detector.detect(frame_bgr)
+
+        # Reflect-pad the frame before detection. A face that is half cut off at
+        # the frame edge becomes a more complete face in the mirrored border, so
+        # YuNet can still detect it (this is the key fix for edge faces that
+        # would otherwise go undetected and expose the face).
+        bx_pad = int(round(w * self.detect_pad))
+        by_pad = int(round(h * self.detect_pad))
+        padded = cv2.copyMakeBorder(
+            frame_bgr, by_pad, by_pad, bx_pad, bx_pad, cv2.BORDER_REFLECT)
+        ph, pw = padded.shape[:2]
+        self.detector.setInputSize((pw, ph))
+        _, faces = self.detector.detect(padded)
+
         boxes = []
         if faces is not None:
             for f in faces:
                 # YuNet row: x, y, w, h, then 5 landmarks (10 vals), then score.
-                bx, by, bw, bh = float(f[0]), float(f[1]), float(f[2]), float(f[3])
+                # Map from padded coords back to the original frame.
+                bx = float(f[0]) - bx_pad
+                by = float(f[1]) - by_pad
+                bw = float(f[2])
+                bh = float(f[3])
+
+                # Keep only faces whose center lands within (or right at) the
+                # real frame. This discards pure mirror-reflection detections
+                # that live entirely in the border, while keeping genuine
+                # half-off-the-edge faces (whose center sits near the edge).
+                cx = bx + bw / 2.0
+                cy = by + bh / 2.0
+                if not (-0.15 * bw <= cx <= w + 0.15 * bw and
+                        -0.15 * bh <= cy <= h + 0.15 * bh):
+                    continue
+
                 px = bw * padding
                 py = bh * padding
                 x0 = bx - px
                 y0 = by - py * 1.3   # extra above for forehead/hair
                 x1 = bx + bw + px
                 y1 = by + bh + py
+
+                # Edge-glue: if a face is near a frame edge, extend the covered
+                # box past that edge so a face sliding off-frame never leaves an
+                # exposed sliver at the very border.
+                m_x = bw * self.edge_margin
+                m_y = bh * self.edge_margin
+                if bx <= m_x:
+                    x0 = -px - m_x
+                if by <= m_y:
+                    y0 = -py - m_y
+                if bx + bw >= w - m_x:
+                    x1 = w + px + m_x
+                if by + bh >= h - m_y:
+                    y1 = h + py + m_y
+
                 boxes.append((x0, y0, x1, y1))
 
         if boxes:

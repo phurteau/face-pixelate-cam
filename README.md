@@ -167,6 +167,10 @@ file to return to defaults.
 - **Face flickers when I turn fully sideways** → increase padding (`=`) or the
   hold window (`hold_frames` in `settings.json`). Face detectors are weakest on
   full profiles; the padding + hold buffer cover the gap.
+- **Face gets exposed at the edge of the frame** → this is handled: detection
+  runs on a mirror‑padded frame so half‑off‑edge faces are still found, and the
+  box is "glued" to the frame border so it can't leave an exposed sliver. If you
+  push it (very fast exits), raise `hold_frames` or `padding` in `settings.json`.
 - **"YuNet model not found"** → the file `face_detection_yunet_2023mar.onnx`
   must be in the same folder as `pixelate_cam.py`. Re‑download it from the
   OpenCV Zoo if it's missing.
@@ -199,6 +203,11 @@ Each frame, OpenCV's YuNet detector returns bounding boxes for detected faces.
 The app pixelates **only those rectangles** (down‑scale then nearest‑neighbor
 up‑scale), copying the blocks back over the face region. Every other pixel is
 the original frame, so your body and background are unchanged.
+
+**Edge handling:** detection runs on a mirror‑padded copy of the frame, so a
+face that is half cut off at the border is still detected (its mirrored half
+completes it). Boxes near a border are extended to the frame edge, so a face
+moving out of frame is never briefly exposed at the very edge.
 
 ---
 
