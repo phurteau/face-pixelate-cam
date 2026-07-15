@@ -71,6 +71,30 @@ else:
 
 SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
 MODEL_PATH = os.path.join(BUNDLE_DIR, "face_detection_yunet_2023mar.onnx")
+LOG_PATH = os.path.join(APP_DIR, "run-log.txt")
+
+
+def fatal(msg):
+    """Report a fatal startup error even when there is no console window.
+
+    When launched via pythonw.exe (windowless), stdout/stderr are invisible, so
+    we (1) write the message to run-log.txt next to the app and (2) pop a native
+    Windows message box. Then exit non-zero.
+    """
+    print(f"ERROR: {msg}")
+    try:
+        with open(LOG_PATH, "w", encoding="utf-8") as f:
+            f.write("face-pixelate-cam could not start:\n\n" + msg + "\n")
+    except Exception:
+        pass
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                None, msg, "face-pixelate-cam - cannot start", 0x10)
+        except Exception:
+            pass
+    sys.exit(1)
 
 DEFAULTS = {
     "block": 16,          # pixelation block size in px (bigger = chunkier)
@@ -314,8 +338,7 @@ def main():
     try:
         tracker = FaceTracker(MODEL_PATH, s["min_confidence"], s["hold_frames"])
     except FileNotFoundError as e:
-        print(f"ERROR: {e}")
-        sys.exit(1)
+        fatal(str(e))
 
     # Open webcam.
     cap = cv2.VideoCapture(args.camera, cv2.CAP_DSHOW if os.name == "nt" else 0)
@@ -323,14 +346,15 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
     cap.set(cv2.CAP_PROP_FPS, args.fps)
     if not cap.isOpened():
-        print(f"ERROR: could not open camera index {args.camera}.")
-        print("Try a different --camera index (0,1,2...) or close other apps using the webcam.")
-        sys.exit(1)
+        fatal(f"Could not open camera index {args.camera}.\n\n"
+              "Another app may be using the webcam, or the index is wrong. "
+              "Close other apps using the camera, or try a different index with "
+              "run-clean.bat --camera 1 (then 2, etc.).")
 
     ok, probe = cap.read()
     if not ok:
-        print("ERROR: camera opened but returned no frame.")
-        sys.exit(1)
+        fatal("The camera opened but returned no frame. Close other apps that "
+              "may be using the webcam and try again.")
     H, W = probe.shape[:2]
     print(f"Camera {args.camera}: {W}x{H}")
 
@@ -359,11 +383,10 @@ def main():
 
     # Guard against a no-op combo: nothing to show and nowhere to send frames.
     if args.no_preview and vcam is None:
-        print("ERROR: --no-preview was set but the virtual camera is not "
-              "available, so there is no output. Remove --no-preview or fix "
-              "the virtual camera.")
         cap.release()
-        sys.exit(1)
+        fatal("--no-preview was set but the virtual camera is not available, so "
+              "there would be no output. Remove --no-preview, or set up the OBS "
+              "virtual camera (run diagnose.bat for help).")
 
     WINDOW = "face-pixelate-cam (preview)"
     # Mutable UI state shared with the mouse callback. Overlay starts HIDDEN so

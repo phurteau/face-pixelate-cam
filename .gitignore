@@ -7,6 +7,7 @@ settings.json
 # Setup / diagnostic logs
 setup-log.txt
 diagnose-log.txt
+run-log.txt
 
 # PyInstaller build output
 build/

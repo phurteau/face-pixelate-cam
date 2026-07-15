@@ -1,22 +1,20 @@
 @echo off
 REM ============================================================
 REM  face-pixelate-cam : launch the filter + virtual camera
-REM  Runs the app using the local .venv created by setup.bat.
+REM  Runs the app windowless (no console) using the local .venv.
 REM  You can pass extra options, e.g.:  run.bat --camera 1 --mirror
+REM  Startup errors are shown in a popup and saved to run-log.txt.
 REM ============================================================
 setlocal
 cd /d "%~dp0"
 
-if not exist ".venv\Scripts\python.exe" (
+if not exist ".venv\Scripts\pythonw.exe" (
     echo ERROR: .venv not found. Run setup.bat first.
     pause
     exit /b 1
 )
 
-".venv\Scripts\python.exe" pixelate_cam.py %*
-
-if %errorlevel% neq 0 (
-    echo.
-    echo The app exited with an error. See messages above.
-    pause
-)
+REM Launch with pythonw.exe (no console window) and exit this script so no
+REM black command window stays open while the app runs live.
+start "" ".venv\Scripts\pythonw.exe" pixelate_cam.py %*
+exit /b 0
