@@ -128,6 +128,7 @@ The overlay is **hidden by default** for a clean preview. Click the small
 |---|---|
 | `q` / `Esc` / close window (X) | Quit |
 | `h` / corner button | Show/hide the settings overlay |
+| `t` | Open the theme / accent color‑wheel picker |
 | `[` / `]` | Pixel block size - smaller / larger blocks |
 | `-` / `=` | Face padding - less / more safety margin |
 | `b` / `B` | Brightness down / up |
@@ -161,6 +162,30 @@ version exists, a green **banner** appears along the bottom of the window:
   appears on the virtual‑camera output).
 - Launch with `run.bat --no-update-check` (or `run-clean.bat --no-update-check`)
   to skip the check entirely. Check your version with `run.bat --version`.
+
+---
+
+## Theming & accent color
+
+The UI is a **token‑based, dual‑theme** system: a **true‑black dark** theme
+(default) plus a soft off‑white **light** theme, both with neutral‑gray panels.
+A single user‑chosen **accent** color drives *every* highlight - the corner
+button's active state, the version line, the update banner, the picker, and
+focus/active states - so any accent looks good against the neutral surfaces.
+
+![The accent color-wheel picker and themed overlay](docs/theme-picker.png)
+
+- Press **`t`** to open the **accent picker**: an **HSV color wheel** (hue =
+  angle, saturation = distance from center) with a **Brightness** slider, a live
+  swatch + hex readout, a **Theme: dark/light** toggle, and a **Reset** button.
+  Drag on the wheel or slider to change the accent live.
+- The accent's companion shades are derived automatically: a brighter
+  `acc2` (for glows/hover/active borders) and an `acc-ink` (black or white,
+  chosen by luminance) so text on an accent fill always stays readable.
+- **Default theme is dark; default accent is `#025500`** (a dimmed green).
+- Your theme and accent **persist** to `settings.json` (saved when you close the
+  picker or press **`5`**). You can also set them from the command line:
+  `run.bat --accent "#3aa0ff" --theme light`.
 
 ---
 

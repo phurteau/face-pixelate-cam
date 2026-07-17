@@ -33,6 +33,7 @@ Hotkeys (focus the preview window):
   w / W   : warmth      cooler / warmer
   g / G   : gamma       down / up
   h       : toggle on-screen help overlay
+  t       : toggle the theme / accent color picker (HSV wheel)
   p       : toggle pixelation on/off (panic peek)
   0       : reset all lighting adjustments to neutral
   5       : save settings      9 : reload settings from disk
@@ -109,7 +110,7 @@ def fatal(msg):
 # silently ignored so they never disrupt streaming.
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 REPO = "phurteau/face-pixelate-cam"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 # How long the banner stays on screen (seconds) before auto-hiding, so it never
@@ -235,6 +236,8 @@ DEFAULTS = {
     "hold_frames": 20,    # safety: keep last face box for N frames if lost
     "min_confidence": 0.5,  # YuNet score threshold (0..1); lower = catch more
     "pixelate_on": True,
+    "theme": "dark",       # "dark" (default) or "light"
+    "accent": "#025500",   # single accent that drives all UI highlights
 }
 
 # Clamp ranges for each adjustable setting.
@@ -273,6 +276,113 @@ def save_settings(s):
         print("Saved settings.json")
     except Exception as e:
         print(f"WARN: could not save settings ({e})")
+
+
+# ---------------------------------------------------------------------------
+# Theme / design tokens (dark default + light) driven by a single accent.
+# Faithful port of the web token system: every drawn color comes from a token,
+# and one user-chosen ACCENT drives all highlights. Colors are stored as hex
+# and resolved to BGR for OpenCV. acc2 / acc-ink are DERIVED from the accent.
+# ---------------------------------------------------------------------------
+
+DEFAULT_ACCENT = "#025500"
+
+THEME_TOKENS = {
+    # neutral surfaces only -- no color tint, so any accent looks good
+    "dark": {
+        "bg": "#000000", "bg2": "#060606", "panel": "#101012", "panel2": "#17171a",
+        "line": "#2a2a2e", "txt": "#ededed", "dim": "#9a9a9a",
+    },
+    "light": {
+        "bg": "#eef4ef", "bg2": "#e6ede8", "panel": "#ffffff", "panel2": "#f2f7f3",
+        "line": "#cfe0d4", "txt": "#12251a", "dim": "#5c7a66",
+    },
+}
+
+
+def hex_to_rgb(h):
+    h = str(h).lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    if len(h) != 6:
+        h = "025500"
+    try:
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return (2, 85, 0)
+
+
+def rgb_to_hex(rgb):
+    r, g, b = (max(0, min(255, int(round(v)))) for v in rgb)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def hex_to_bgr(h):
+    r, g, b = hex_to_rgb(h)
+    return (b, g, r)  # OpenCV is BGR
+
+
+def rgb_to_hsl(r, g, b):
+    r, g, b = r / 255.0, g / 255.0, b / 255.0
+    mx, mn = max(r, g, b), min(r, g, b)
+    l = (mx + mn) / 2.0
+    d = mx - mn
+    if d == 0:
+        return 0.0, 0.0, l
+    s = d / (1 - abs(2 * l - 1)) if l not in (0, 1) else 0.0
+    if mx == r:
+        h = ((g - b) / d) % 6
+    elif mx == g:
+        h = (b - r) / d + 2
+    else:
+        h = (r - g) / d + 4
+    return h * 60.0, s, l
+
+
+def hsl_to_rgb(h, s, l):
+    c = (1 - abs(2 * l - 1)) * s
+    hp = (h % 360) / 60.0
+    x = c * (1 - abs(hp % 2 - 1))
+    if hp < 1:   r, g, b = c, x, 0
+    elif hp < 2: r, g, b = x, c, 0
+    elif hp < 3: r, g, b = 0, c, x
+    elif hp < 4: r, g, b = 0, x, c
+    elif hp < 5: r, g, b = x, 0, c
+    else:        r, g, b = c, 0, x
+    m = l - c / 2
+    return ((r + m) * 255, (g + m) * 255, (b + m) * 255)
+
+
+def derive_accent(acc_hex):
+    """Derive the accent companion tokens exactly as the design spec dictates.
+
+    - acc2   : same hue, saturation raised to >=45%, lightness +20% (cap 75%).
+    - acc-ink: black ink on light accents (YIQ > 140), white otherwise.
+    Returns dict of BGR tuples plus the canonical hex strings.
+    """
+    r, g, b = hex_to_rgb(acc_hex)
+    h, s, l = rgb_to_hsl(r, g, b)
+    s2 = max(s, 0.45)
+    l2 = min(l + 0.20, 0.75)
+    acc2_rgb = hsl_to_rgb(h, s2, l2)
+    yiq = (r * 299 + g * 587 + b * 114) / 1000.0
+    ink_hex = "#08140a" if yiq > 140 else "#ffffff"
+    return {
+        "acc": (b, g, r),
+        "acc2": (int(acc2_rgb[2]), int(acc2_rgb[1]), int(acc2_rgb[0])),
+        "acc_ink": hex_to_bgr(ink_hex),
+        "acc_hex": rgb_to_hex((r, g, b)),
+        "acc2_hex": rgb_to_hex(acc2_rgb),
+    }
+
+
+def build_theme(theme_name, accent_hex):
+    """Resolve all tokens to BGR for the current theme + accent."""
+    base = THEME_TOKENS.get(theme_name, THEME_TOKENS["dark"])
+    th = {k: hex_to_bgr(v) for k, v in base.items()}
+    th.update(derive_accent(accent_hex))
+    th["name"] = theme_name
+    return th
 
 
 # ---------------------------------------------------------------------------
@@ -450,47 +560,54 @@ def point_in_button(x, y):
     return bx <= x <= bx + bw and by <= y <= by + bh
 
 
-def draw_button(frame, show_help):
-    """Draw the little hide/unhide button in the corner of the preview."""
+def _text(frame, text, org, color, scale=0.5, thick=1):
+    """Draw text with a subtle dark outline so it stays legible over video."""
+    cv2.putText(frame, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                (0, 0, 0), thick + 2, cv2.LINE_AA)
+    cv2.putText(frame, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale,
+                color, thick, cv2.LINE_AA)
+
+
+def draw_button(frame, show_help, th):
+    """Corner show/hide button. Neutral panel surface; active state fills accent."""
     x, y, w, h = UI_BUTTON
     overlay = frame.copy()
-    cv2.rectangle(overlay, (x, y), (x + w, y + h), (35, 35, 35), -1)
-    cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
-    cv2.rectangle(frame, (x, y), (x + w, y + h), (210, 210, 210), 1)
+    fill = th["acc"] if show_help else th["panel2"]
+    cv2.rectangle(overlay, (x, y), (x + w, y + h), fill, -1)
+    cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+    border = th["acc2"] if show_help else th["line"]
+    cv2.rectangle(frame, (x, y), (x + w, y + h), border, 1)
+    icon = th["acc_ink"] if show_help else th["txt"]
     if show_help:
-        # Overlay visible -> show an "X" (click to hide the UI).
-        cv2.line(frame, (x + 13, y + 10), (x + w - 13, y + h - 10), (235, 235, 235), 2, cv2.LINE_AA)
-        cv2.line(frame, (x + w - 13, y + 10), (x + 13, y + h - 10), (235, 235, 235), 2, cv2.LINE_AA)
+        cv2.line(frame, (x + 13, y + 10), (x + w - 13, y + h - 10), icon, 2, cv2.LINE_AA)
+        cv2.line(frame, (x + w - 13, y + 10), (x + 13, y + h - 10), icon, 2, cv2.LINE_AA)
     else:
-        # Overlay hidden -> show a "hamburger" (click to show the UI).
         for i in range(3):
             yy = y + 11 + i * 5
-            cv2.line(frame, (x + 12, yy), (x + w - 12, yy), (235, 235, 235), 2, cv2.LINE_AA)
+            cv2.line(frame, (x + 12, yy), (x + w - 12, yy), icon, 2, cv2.LINE_AA)
     return frame
 
 
-def draw_update_banner(frame, text):
-    """Draw a bottom-of-frame update banner on the preview. Returns frame.
+def draw_update_banner(frame, text, th):
+    """Bottom update banner styled as a primary/accent call-to-action.
 
     Drawn on the preview copy only (never on the virtual-camera output), so it
-    is stream-safe in virtual-camera mode. In Window-Capture (clean) mode it
-    auto-hides after UPDATE_BANNER_SECONDS.
+    is stream-safe. In Window-Capture (clean) mode it auto-hides.
     """
     h, w = frame.shape[:2]
     bar_h = 30
     y0 = h - bar_h
     overlay = frame.copy()
-    cv2.rectangle(overlay, (0, y0), (w, h), (30, 90, 30), -1)
-    cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)
-    cv2.circle(frame, (16, y0 + bar_h // 2), 5, (80, 240, 80), -1, cv2.LINE_AA)
+    cv2.rectangle(overlay, (0, y0), (w, h), th["acc"], -1)      # primary fill
+    cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+    cv2.line(frame, (0, y0), (w, y0), th["acc2"], 1)           # accent top edge
+    cv2.circle(frame, (16, y0 + bar_h // 2), 5, th["acc2"], -1, cv2.LINE_AA)
     cv2.putText(frame, text, (30, y0 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                (0, 0, 0), 3, cv2.LINE_AA)
-    cv2.putText(frame, text, (30, y0 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                (255, 255, 255), 1, cv2.LINE_AA)
+                th["acc_ink"], 1, cv2.LINE_AA)                  # ink reads on accent
     return frame
 
 
-def draw_help(frame, s, fps, using_vcam):
+def draw_help(frame, s, fps, using_vcam, th):
     lines = [
         f"face-pixelate-cam v{APP_VERSION}  | "
         f"pixelate:{'ON' if s['pixelate_on'] else 'OFF'}  "
@@ -498,16 +615,201 @@ def draw_help(frame, s, fps, using_vcam):
         f"block[{s['block']}] pad[{s['padding']:.2f}]  "
         f"bright[{s['brightness']:+.0f}] contr[{s['contrast']:.2f}] "
         f"sat[{s['saturation']:.2f}] warm[{s['warmth']:+.0f}] gamma[{s['gamma']:.2f}]",
-        "keys: [ ] pad:- = | bBcCsSwWgG | p peek | 0 reset | 5 save | h/btn hide | q quit",
+        "keys: [ ] pad:- = | bBcCsSwWgG | p peek | 0 reset | 5 save | t theme | q quit",
     ]
-    y = 60  # start below the corner button
-    for ln in lines:
-        cv2.putText(frame, ln, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                    (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(frame, ln, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                    (0, 255, 0), 1, cv2.LINE_AA)
-        y += 24
+    # Neutral panel card behind the text for a themed, legible surface.
+    pad = 8
+    y = 52
+    line_h = 24
+    x0 = 6
+    x1 = min(frame.shape[1] - 6, 690)
+    y_top = y - 18
+    y_bot = y + line_h * len(lines) - 6
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x0, y_top), (x1, y_bot), th["panel"], -1)
+    cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
+    cv2.rectangle(frame, (x0, y_top), (x1, y_bot), th["line"], 1)
+    # First line uses the accent companion; rest uses primary/dim text.
+    _text(frame, lines[0], (x0 + pad, y), th["acc2"])
+    _text(frame, lines[1], (x0 + pad, y + line_h), th["txt"])
+    _text(frame, lines[2], (x0 + pad, y + line_h * 2), th["dim"])
     return frame
+
+
+# ---------------------------------------------------------------------------
+# HSV color-wheel accent picker (the design system's signature control).
+# hue = angle, saturation = radius, a Brightness (Value) bar below the wheel,
+# a live swatch + hex readout, a theme toggle and a reset button.
+# ---------------------------------------------------------------------------
+
+def rgb_to_hsv(r, g, b):
+    r, g, b = r / 255.0, g / 255.0, b / 255.0
+    mx, mn = max(r, g, b), min(r, g, b)
+    d = mx - mn
+    if d == 0:
+        h = 0.0
+    elif mx == r:
+        h = ((g - b) / d) % 6
+    elif mx == g:
+        h = (b - r) / d + 2
+    else:
+        h = (r - g) / d + 4
+    h *= 60.0
+    s = 0.0 if mx == 0 else d / mx
+    return h, s, mx
+
+
+def hsv_to_rgb(h, s, v):
+    hp = (h % 360) / 60.0
+    c = v * s
+    x = c * (1 - abs(hp % 2 - 1))
+    if hp < 1:   r, g, b = c, x, 0
+    elif hp < 2: r, g, b = x, c, 0
+    elif hp < 3: r, g, b = 0, c, x
+    elif hp < 4: r, g, b = 0, x, c
+    elif hp < 5: r, g, b = x, 0, c
+    else:        r, g, b = c, 0, x
+    m = v - c
+    return ((r + m) * 255, (g + m) * 255, (b + m) * 255)
+
+
+_WHEEL_CACHE = {}
+
+
+def render_color_wheel(radius, value):
+    """Return (bgr_image, circle_mask) for an HSV wheel at the given Value.
+
+    Cached by (radius, quantized value) so it is only recomputed on change.
+    hue = angle around the circle, saturation = distance from the center.
+    """
+    key = (radius, int(round(value * 50)))
+    cached = _WHEEL_CACHE.get(key)
+    if cached is not None:
+        return cached
+    size = radius * 2
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+    dx = xx - radius
+    dy = yy - radius
+    dist = np.sqrt(dx * dx + dy * dy)
+    mask = dist <= radius
+    ang = (np.degrees(np.arctan2(-dy, dx)) % 360.0)
+    hsv = np.zeros((size, size, 3), np.uint8)
+    hsv[..., 0] = (ang / 2.0).astype(np.uint8)                 # OpenCV hue 0-179
+    hsv[..., 1] = np.clip(dist / radius * 255.0, 0, 255).astype(np.uint8)
+    hsv[..., 2] = int(round(max(0.0, min(1.0, value)) * 255))
+    bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+    bgr[~mask] = 0
+    _WHEEL_CACHE[key] = (bgr, mask)
+    if len(_WHEEL_CACHE) > 24:
+        _WHEEL_CACHE.pop(next(iter(_WHEEL_CACHE)))
+    return bgr, mask
+
+
+def picker_geometry(frame_w, frame_h):
+    """Compute the picker panel layout for the current frame size."""
+    pw, ph = 210, 356
+    px = frame_w - pw - 20
+    py = 50
+    R = 78
+    cx = px + pw // 2
+    cy = py + 34 + R
+    bar = (px + 16, cy + R + 18, pw - 32, 14)
+    swatch = (px + 16, bar[1] + bar[3] + 14, 40, 24)
+    btn_y = py + ph - 40
+    theme_btn = (px + 16, btn_y, 88, 26)
+    reset_btn = (px + pw - 16 - 88, btn_y, 88, 26)
+    return {
+        "panel": (px, py, pw, ph), "wheel": (cx, cy, R), "bar": bar,
+        "swatch": swatch, "theme_btn": theme_btn, "reset_btn": reset_btn,
+    }
+
+
+def draw_picker(frame, s, th, geom):
+    """Draw the accent picker panel. Geometry comes from picker_geometry()."""
+    px, py, pw, ph = geom["panel"]
+    cx, cy, R = geom["wheel"]
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (px, py), (px + pw, py + ph), th["panel"], -1)
+    cv2.addWeighted(overlay, 0.9, frame, 0.1, 0, frame)
+    cv2.rectangle(frame, (px, py), (px + pw, py + ph), th["line"], 1)
+    _text(frame, "Accent", (px + 16, py + 24), th["txt"], 0.55)
+
+    r, g, b = hex_to_rgb(s["accent"])
+    h, sat, val = rgb_to_hsv(r, g, b)
+
+    # Wheel (composited within its circular mask).
+    wheel, mask = render_color_wheel(R, val)
+    y0, y1 = cy - R, cy + R
+    x0, x1 = cx - R, cx + R
+    roi = frame[y0:y1, x0:x1]
+    roi[mask] = wheel[mask]
+    cv2.circle(frame, (cx, cy), R, th["line"], 1, cv2.LINE_AA)
+    # Selection dot.
+    dot = (int(cx + np.cos(np.radians(h)) * sat * R),
+           int(cy - np.sin(np.radians(h)) * sat * R))
+    cv2.circle(frame, dot, 6, (255, 255, 255), -1, cv2.LINE_AA)
+    cv2.circle(frame, dot, 6, (0, 0, 0), 1, cv2.LINE_AA)
+
+    # Brightness (Value) bar.
+    bx, by, bw, bh = geom["bar"]
+    for i in range(bw):
+        vv = i / max(1, bw - 1)
+        col = hsv_to_rgb(h, sat, vv)
+        cv2.line(frame, (bx + i, by), (bx + i, by + bh),
+                 (int(col[2]), int(col[1]), int(col[0])), 1)
+    cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), th["line"], 1)
+    hx = bx + int(val * bw)
+    cv2.rectangle(frame, (hx - 2, by - 2), (hx + 2, by + bh + 2), th["txt"], -1)
+    _text(frame, "Brightness", (bx, by - 6), th["dim"], 0.4)
+
+    # Swatch + hex readout.
+    sx, sy, sw, sh = geom["swatch"]
+    cv2.rectangle(frame, (sx, sy), (sx + sw, sy + sh), th["acc"], -1)
+    cv2.rectangle(frame, (sx, sy), (sx + sw, sy + sh), th["line"], 1)
+    _text(frame, s["accent"], (sx + sw + 12, sy + 17), th["txt"], 0.5)
+
+    # Theme + Reset buttons.
+    for key, label in (("theme_btn", f"Theme: {s['theme']}"),
+                       ("reset_btn", "Reset")):
+        bxx, byy, bww, bhh = geom[key]
+        cv2.rectangle(frame, (bxx, byy), (bxx + bww, byy + bhh), th["panel2"], -1)
+        cv2.rectangle(frame, (bxx, byy), (bxx + bww, byy + bhh), th["line"], 1)
+        _text(frame, label, (bxx + 8, byy + 17), th["txt"], 0.4)
+    return frame
+
+
+def picker_click(s, geom, mx, my, dragging):
+    """Apply a click/drag inside the picker. Returns True if it hit a control."""
+    cx, cy, R = geom["wheel"]
+    r, g, b = hex_to_rgb(s["accent"])
+    h, sat, val = rgb_to_hsv(r, g, b)
+
+    dx, dy = mx - cx, my - cy
+    dist = (dx * dx + dy * dy) ** 0.5
+    if dist <= R + 6:
+        new_h = np.degrees(np.arctan2(-dy, dx)) % 360.0
+        new_s = min(1.0, dist / R)
+        col = hsv_to_rgb(new_h, new_s, val if val > 0 else 1.0)
+        s["accent"] = rgb_to_hex(col)
+        return True
+
+    bx, by, bw, bh = geom["bar"]
+    if bx - 4 <= mx <= bx + bw + 4 and by - 6 <= my <= by + bh + 6:
+        new_v = max(0.0, min(1.0, (mx - bx) / bw))
+        col = hsv_to_rgb(h, sat, new_v)
+        s["accent"] = rgb_to_hex(col)
+        return True
+
+    if not dragging:
+        tx, ty, tw, thh = geom["theme_btn"]
+        if tx <= mx <= tx + tw and ty <= my <= ty + thh:
+            s["theme"] = "light" if s["theme"] == "dark" else "dark"
+            return True
+        rx, ry, rw, rh = geom["reset_btn"]
+        if rx <= mx <= rx + rw and ry <= my <= ry + rh:
+            s["accent"] = DEFAULT_ACCENT
+            return True
+    return False
 
 
 def main():
@@ -528,11 +830,22 @@ def main():
                          "'Window Capture' (no virtual camera needed).")
     ap.add_argument("--no-update-check", action="store_true",
                     help="Do not check GitHub for a newer version on launch.")
+    ap.add_argument("--accent", default=None,
+                    help="Set the accent color as #rrggbb (persists to settings).")
+    ap.add_argument("--theme", choices=["dark", "light"], default=None,
+                    help="Set the UI theme (persists to settings).")
     ap.add_argument("--version", action="version",
                     version=f"face-pixelate-cam {APP_VERSION}")
     args = ap.parse_args()
 
     s = load_settings()
+    if args.accent:
+        s["accent"] = args.accent
+    if args.theme:
+        s["theme"] = args.theme
+    if args.accent or args.theme:
+        save_settings(s)  # CLI overrides persist immediately
+    theme = build_theme(s["theme"], s["accent"])
     gamma_lut = build_gamma_lut(s["gamma"])
 
     # Face detector (fail early with a clear message if the model is missing).
@@ -592,9 +905,21 @@ def main():
     WINDOW = "face-pixelate-cam (preview)"
     # Mutable UI state shared with the mouse callback. Overlay starts HIDDEN so
     # the preview is clean; only the small corner button shows.
-    ui = {"show_overlay": False}
+    ui = {"show_overlay": False, "show_picker": False,
+          "picker_geom": None, "wheel_drag": False}
 
     def on_mouse(event, mx, my, flags, param):
+        # Accent picker gets first dibs on the mouse when it is open.
+        if ui["show_picker"] and ui["picker_geom"] is not None:
+            if event == cv2.EVENT_LBUTTONDOWN:
+                if picker_click(s, ui["picker_geom"], mx, my, dragging=False):
+                    ui["wheel_drag"] = True
+                    return
+            elif event == cv2.EVENT_MOUSEMOVE and ui["wheel_drag"]:
+                picker_click(s, ui["picker_geom"], mx, my, dragging=True)
+                return
+            elif event == cv2.EVENT_LBUTTONUP:
+                ui["wheel_drag"] = False
         if event == cv2.EVENT_LBUTTONDOWN and point_in_button(mx, my):
             ui["show_overlay"] = not ui["show_overlay"]
 
@@ -650,16 +975,26 @@ def main():
 
             # 4) Preview.
             if not args.no_preview:
+                # Rebuild the theme each frame so accent/theme changes are live.
+                theme = build_theme(s["theme"], s["accent"])
                 disp = frame.copy()
                 # Clean mode starts bare (no button, no overlay) so the captured
                 # window is uncluttered. Pressing 'h' -- or clicking the top-left
                 # corner -- still summons the full controls when you need them;
                 # press 'h' again to go bare for streaming.
                 if ui["show_overlay"]:
-                    draw_help(disp, s, fps, vcam is not None)
-                    draw_button(disp, ui["show_overlay"])
+                    draw_help(disp, s, fps, vcam is not None, theme)
+                    draw_button(disp, ui["show_overlay"], theme)
                 elif not args.clean:
-                    draw_button(disp, ui["show_overlay"])
+                    draw_button(disp, ui["show_overlay"], theme)
+
+                # Accent picker panel (toggle with 't').
+                if ui["show_picker"]:
+                    geom = picker_geometry(disp.shape[1], disp.shape[0])
+                    ui["picker_geom"] = geom
+                    draw_picker(disp, s, theme, geom)
+                else:
+                    ui["picker_geom"] = None
 
                 # Update banner (drawn on the preview copy only -> never hits the
                 # virtual camera). Auto-hides after UPDATE_BANNER_SECONDS so it
@@ -678,7 +1013,7 @@ def main():
                                   "press U to download, N to dismiss")
                         show_banner = elapsed < UPDATE_BANNER_SECONDS
                     if show_banner:
-                        draw_update_banner(disp, banner)
+                        draw_update_banner(disp, banner, theme)
 
                 cv2.imshow(WINDOW, disp)
                 key = cv2.waitKey(1) & 0xFF
@@ -693,6 +1028,10 @@ def main():
                         start_download(upd, update_state)
                 elif key in (ord('n'), ord('N')):
                     update_state["dismissed"] = True
+                elif key in (ord('t'), ord('T')):
+                    ui["show_picker"] = not ui["show_picker"]
+                    if not ui["show_picker"]:
+                        save_settings(s)  # persist accent/theme on picker close
                 elif key == ord('h'):
                     ui["show_overlay"] = not ui["show_overlay"]
                 elif key == ord('p'):
