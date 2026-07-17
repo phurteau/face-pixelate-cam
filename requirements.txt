@@ -4,3 +4,4 @@
 opencv-python==4.11.0.86   # abi3 wheels: install on any Python 3.x
 numpy==2.5.1               # wheels for cp312 / cp313 / cp314
 pyvirtualcam==0.15.0       # wheels for cp39 .. cp314
+pillow==12.3.0             # TrueType text rendering; wheels for cp39 .. cp314

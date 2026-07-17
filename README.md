@@ -186,6 +186,9 @@ focus/active states - so any accent looks good against the neutral surfaces.
 - Your theme and accent **persist** to `settings.json` (saved when you close the
   picker or press **`5`**). You can also set them from the command line:
   `run.bat --accent "#3aa0ff" --theme light`.
+- All overlay text is rendered with a real **TrueType font** (Segoe UI on
+  Windows) via Pillow for a clean, professional look, with an automatic
+  fallback if the font/library isn't available.
 
 ---
 

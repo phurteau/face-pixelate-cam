@@ -66,6 +66,123 @@ try:
 except ImportError:
     HAVE_VCAM = False
 
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    HAVE_PIL = True
+except ImportError:
+    HAVE_PIL = False
+
+
+# ---------------------------------------------------------------------------
+# Professional text rendering via a real TrueType font (Pillow). Falls back to
+# OpenCV's cleaner DUPLEX Hershey font if Pillow or the font is unavailable.
+# Text is rendered to small RGBA patches and alpha-composited onto the frame,
+# so only the text region is touched (no full-frame conversion per string).
+# ---------------------------------------------------------------------------
+
+# Preferred fonts, in order. Segoe UI ships on every Windows machine.
+_FONT_FILES = {
+    False: [r"C:\Windows\Fonts\segoeui.ttf", r"C:\Windows\Fonts\arial.ttf"],
+    True:  [r"C:\Windows\Fonts\seguisb.ttf", r"C:\Windows\Fonts\segoeuib.ttf",
+            r"C:\Windows\Fonts\arialbd.ttf", r"C:\Windows\Fonts\segoeui.ttf"],
+}
+_FONT_CACHE = {}
+
+
+def _load_font(size, bold=False):
+    if not HAVE_PIL:
+        return None
+    key = (int(size), bool(bold))
+    if key in _FONT_CACHE:
+        return _FONT_CACHE[key]
+    font = None
+    for path in _FONT_FILES[bool(bold)]:
+        try:
+            font = ImageFont.truetype(path, int(size))
+            break
+        except Exception:
+            continue
+    if font is None:
+        try:
+            font = ImageFont.load_default()
+        except Exception:
+            font = None
+    _FONT_CACHE[key] = font
+    return font
+
+
+def text_width(text, size=16, bold=False):
+    """Pixel width of `text` in the current font (for layout/right-align)."""
+    font = _load_font(size, bold)
+    if font is None:
+        return int(len(text) * size * 0.55)
+    l, _, r, _ = font.getbbox(text)
+    return int(r - l)
+
+
+_TEXT_CACHE = {}
+
+
+def _render_text_patch(text, size, bold, color_bgr, outline):
+    """Render text to a cached BGRA patch (B,G,R,alpha as float32 0..1 alpha).
+
+    Cached by content so steady-state overlays only pay compositing cost, not
+    re-rasterization. Returns (bgr_float, alpha) or None if PIL unavailable.
+    """
+    font = _load_font(size, bold)
+    if font is None:
+        return None
+    key = (text, int(size), bool(bold), tuple(color_bgr), int(outline))
+    cached = _TEXT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    l, t, r, b = font.getbbox(text, stroke_width=outline)
+    pad = outline + 1
+    pw, ph = (r - l) + pad * 2, (b - t) + pad * 2
+    img = Image.new("RGBA", (max(1, pw), max(1, ph)), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    fill = (color_bgr[2], color_bgr[1], color_bgr[0], 255)          # BGR -> RGB
+    draw.text((pad - l, pad - t), text, font=font, fill=fill,
+              stroke_width=outline, stroke_fill=(0, 0, 0, 210))
+    arr = np.asarray(img)
+    bgr = arr[..., 2::-1].astype(np.float32)                        # RGB -> BGR
+    alpha = arr[..., 3:4].astype(np.float32) / 255.0
+    out = (bgr, alpha)
+    _TEXT_CACHE[key] = out
+    if len(_TEXT_CACHE) > 160:
+        _TEXT_CACHE.pop(next(iter(_TEXT_CACHE)))
+    return out
+
+
+def blit_text(frame, text, xy, color_bgr, size=16, bold=False, outline=2):
+    """Draw `text` at top-left `xy` onto the BGR `frame` in-place (TTF)."""
+    if not text:
+        return
+    patch = _render_text_patch(text, size, bold, color_bgr, outline)
+    if patch is None:
+        # Hershey fallback (DUPLEX is noticeably cleaner than SIMPLEX).
+        scale = size / 30.0
+        base = (int(xy[0]), int(xy[1]) + int(size * 0.9))
+        if outline:
+            cv2.putText(frame, text, base, cv2.FONT_HERSHEY_DUPLEX, scale,
+                        (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(frame, text, base, cv2.FONT_HERSHEY_DUPLEX, scale,
+                    color_bgr, 1, cv2.LINE_AA)
+        return
+    bgr, alpha = patch
+    ph, pw = bgr.shape[:2]
+    x, y = int(xy[0]), int(xy[1])
+    fh, fw = frame.shape[:2]
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(fw, x + pw), min(fh, y + ph)
+    if x1 <= x0 or y1 <= y0:
+        return
+    sx0, sy0 = x0 - x, y0 - y
+    a = alpha[sy0:sy0 + (y1 - y0), sx0:sx0 + (x1 - x0)]
+    c = bgr[sy0:sy0 + (y1 - y0), sx0:sx0 + (x1 - x0)]
+    roi = frame[y0:y1, x0:x1].astype(np.float32)
+    frame[y0:y1, x0:x1] = (c * a + roi * (1 - a)).astype(np.uint8)
+
 
 if getattr(sys, "frozen", False):
     # Running inside a PyInstaller one-file exe: bundled data (the model) is
@@ -110,7 +227,7 @@ def fatal(msg):
 # silently ignored so they never disrupt streaming.
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 REPO = "phurteau/face-pixelate-cam"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 # How long the banner stays on screen (seconds) before auto-hiding, so it never
@@ -560,14 +677,6 @@ def point_in_button(x, y):
     return bx <= x <= bx + bw and by <= y <= by + bh
 
 
-def _text(frame, text, org, color, scale=0.5, thick=1):
-    """Draw text with a subtle dark outline so it stays legible over video."""
-    cv2.putText(frame, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale,
-                (0, 0, 0), thick + 2, cv2.LINE_AA)
-    cv2.putText(frame, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale,
-                color, thick, cv2.LINE_AA)
-
-
 def draw_button(frame, show_help, th):
     """Corner show/hide button. Neutral panel surface; active state fills accent."""
     x, y, w, h = UI_BUTTON
@@ -595,44 +704,46 @@ def draw_update_banner(frame, text, th):
     is stream-safe. In Window-Capture (clean) mode it auto-hides.
     """
     h, w = frame.shape[:2]
-    bar_h = 30
+    bar_h = 34
     y0 = h - bar_h
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, y0), (w, h), th["acc"], -1)      # primary fill
-    cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+    cv2.addWeighted(overlay, 0.88, frame, 0.12, 0, frame)
     cv2.line(frame, (0, y0), (w, y0), th["acc2"], 1)           # accent top edge
-    cv2.circle(frame, (16, y0 + bar_h // 2), 5, th["acc2"], -1, cv2.LINE_AA)
-    cv2.putText(frame, text, (30, y0 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                th["acc_ink"], 1, cv2.LINE_AA)                  # ink reads on accent
+    cv2.circle(frame, (18, y0 + bar_h // 2), 5, th["acc2"], -1, cv2.LINE_AA)
+    blit_text(frame, text, (34, y0 + 9), th["acc_ink"], size=16, outline=0)
     return frame
 
 
 def draw_help(frame, s, fps, using_vcam, th):
     lines = [
-        f"face-pixelate-cam v{APP_VERSION}  | "
-        f"pixelate:{'ON' if s['pixelate_on'] else 'OFF'}  "
-        f"vcam:{'ON' if using_vcam else 'preview-only'}  FPS {fps:4.1f}",
-        f"block[{s['block']}] pad[{s['padding']:.2f}]  "
-        f"bright[{s['brightness']:+.0f}] contr[{s['contrast']:.2f}] "
-        f"sat[{s['saturation']:.2f}] warm[{s['warmth']:+.0f}] gamma[{s['gamma']:.2f}]",
-        "keys: [ ] pad:- = | bBcCsSwWgG | p peek | 0 reset | 5 save | t theme | q quit",
+        (f"face-pixelate-cam  v{APP_VERSION}", th["acc2"], True, 17),
+        (f"pixelate {'ON' if s['pixelate_on'] else 'OFF'}   "
+         f"vcam {'ON' if using_vcam else 'preview'}   {fps:2.0f} fps",
+         th["dim"], False, 15),
+        (f"block {s['block']}   pad {s['padding']:.2f}   "
+         f"bright {s['brightness']:+.0f}   contrast {s['contrast']:.2f}   "
+         f"sat {s['saturation']:.2f}   warm {s['warmth']:+.0f}   "
+         f"gamma {s['gamma']:.2f}", th["txt"], False, 16),
+        ("[ ] size    - = padding    b c s w g lighting    "
+         "p peek    0 reset    5 save    t theme", th["dim"], False, 14),
     ]
-    # Neutral panel card behind the text for a themed, legible surface.
-    pad = 8
-    y = 52
-    line_h = 24
-    x0 = 6
-    x1 = min(frame.shape[1] - 6, 690)
-    y_top = y - 18
-    y_bot = y + line_h * len(lines) - 6
+    pad = 14
+    x0 = 8
+    y = 50
+    row_h = 26
+    widths = [text_width(t, sz, bold) for (t, _, bold, sz) in lines]
+    x1 = min(frame.shape[1] - 8, x0 + max(widths) + pad * 2)
+    y_top = y - 10
+    y_bot = y + row_h * len(lines) + 6
     overlay = frame.copy()
     cv2.rectangle(overlay, (x0, y_top), (x1, y_bot), th["panel"], -1)
-    cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
+    cv2.addWeighted(overlay, 0.78, frame, 0.22, 0, frame)
     cv2.rectangle(frame, (x0, y_top), (x1, y_bot), th["line"], 1)
-    # First line uses the accent companion; rest uses primary/dim text.
-    _text(frame, lines[0], (x0 + pad, y), th["acc2"])
-    _text(frame, lines[1], (x0 + pad, y + line_h), th["txt"])
-    _text(frame, lines[2], (x0 + pad, y + line_h * 2), th["dim"])
+    cy = y
+    for (txt, color, bold, sz) in lines:
+        blit_text(frame, txt, (x0 + pad, cy), color, size=sz, bold=bold)
+        cy += row_h
     return frame
 
 
@@ -705,6 +816,28 @@ def render_color_wheel(radius, value):
     return bgr, mask
 
 
+_BAR_CACHE = {}
+
+
+def render_brightness_bar(hue, sat, bw, bh):
+    """Vectorized + cached Value ramp strip for the given hue/saturation."""
+    key = (int(round(hue)), int(round(sat * 50)), bw, bh)
+    cached = _BAR_CACHE.get(key)
+    if cached is not None:
+        return cached
+    vals = (np.linspace(0, 1, bw, dtype=np.float32) * 255).astype(np.uint8)
+    row = np.zeros((1, bw, 3), np.uint8)
+    row[0, :, 0] = int(round((hue % 360) / 2.0))          # OpenCV hue 0-179
+    row[0, :, 1] = int(round(max(0.0, min(1.0, sat)) * 255))
+    row[0, :, 2] = vals
+    strip = cv2.cvtColor(row, cv2.COLOR_HSV2BGR)
+    strip = np.repeat(strip, bh, axis=0)
+    _BAR_CACHE[key] = strip
+    if len(_BAR_CACHE) > 48:
+        _BAR_CACHE.pop(next(iter(_BAR_CACHE)))
+    return strip
+
+
 def picker_geometry(frame_w, frame_h):
     """Compute the picker panel layout for the current frame size."""
     pw, ph = 210, 356
@@ -732,7 +865,7 @@ def draw_picker(frame, s, th, geom):
     cv2.rectangle(overlay, (px, py), (px + pw, py + ph), th["panel"], -1)
     cv2.addWeighted(overlay, 0.9, frame, 0.1, 0, frame)
     cv2.rectangle(frame, (px, py), (px + pw, py + ph), th["line"], 1)
-    _text(frame, "Accent", (px + 16, py + 24), th["txt"], 0.55)
+    blit_text(frame, "Accent", (px + 16, py + 12), th["txt"], size=17, bold=True)
 
     r, g, b = hex_to_rgb(s["accent"])
     h, sat, val = rgb_to_hsv(r, g, b)
@@ -750,23 +883,21 @@ def draw_picker(frame, s, th, geom):
     cv2.circle(frame, dot, 6, (255, 255, 255), -1, cv2.LINE_AA)
     cv2.circle(frame, dot, 6, (0, 0, 0), 1, cv2.LINE_AA)
 
-    # Brightness (Value) bar.
+    # Brightness (Value) bar -- vectorized + cached (only re-rendered when the
+    # hue/saturation change), then blitted as a strip.
     bx, by, bw, bh = geom["bar"]
-    for i in range(bw):
-        vv = i / max(1, bw - 1)
-        col = hsv_to_rgb(h, sat, vv)
-        cv2.line(frame, (bx + i, by), (bx + i, by + bh),
-                 (int(col[2]), int(col[1]), int(col[0])), 1)
+    strip = render_brightness_bar(h, sat, bw, bh)
+    frame[by:by + bh, bx:bx + bw] = strip
     cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), th["line"], 1)
     hx = bx + int(val * bw)
     cv2.rectangle(frame, (hx - 2, by - 2), (hx + 2, by + bh + 2), th["txt"], -1)
-    _text(frame, "Brightness", (bx, by - 6), th["dim"], 0.4)
+    blit_text(frame, "Brightness", (bx, by - 20), th["dim"], size=12)
 
     # Swatch + hex readout.
     sx, sy, sw, sh = geom["swatch"]
     cv2.rectangle(frame, (sx, sy), (sx + sw, sy + sh), th["acc"], -1)
     cv2.rectangle(frame, (sx, sy), (sx + sw, sy + sh), th["line"], 1)
-    _text(frame, s["accent"], (sx + sw + 12, sy + 17), th["txt"], 0.5)
+    blit_text(frame, s["accent"].upper(), (sx + sw + 12, sy + 4), th["txt"], size=16)
 
     # Theme + Reset buttons.
     for key, label in (("theme_btn", f"Theme: {s['theme']}"),
@@ -774,7 +905,9 @@ def draw_picker(frame, s, th, geom):
         bxx, byy, bww, bhh = geom[key]
         cv2.rectangle(frame, (bxx, byy), (bxx + bww, byy + bhh), th["panel2"], -1)
         cv2.rectangle(frame, (bxx, byy), (bxx + bww, byy + bhh), th["line"], 1)
-        _text(frame, label, (bxx + 8, byy + 17), th["txt"], 0.4)
+        lw = text_width(label, 13)
+        blit_text(frame, label, (bxx + max(6, (bww - lw) // 2), byy + 6),
+                  th["txt"], size=13)
     return frame
 
 
