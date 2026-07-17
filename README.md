@@ -151,7 +151,7 @@ On launch the app quietly checks GitHub for a newer release (in the background -
 it never blocks video, and silently does nothing if you're offline). If a newer
 version exists, a green **banner** appears along the bottom of the window:
 
-> ● Update vX.Y.Z available - press **U** to download, **N** to dismiss
+![Update banner shown at the bottom of the preview window](docs/update-banner.png)
 
 - Press **`U`** for a one‑click download: it fetches the new release zip into
   your **Downloads** folder and opens Explorer to it. Extract it and run
