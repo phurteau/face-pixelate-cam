@@ -36,13 +36,19 @@ Hotkeys (focus the preview window):
   p       : toggle pixelation on/off (panic peek)
   0       : reset all lighting adjustments to neutral
   5       : save settings      9 : reload settings from disk
+  U       : download update (shown only when a newer version is available)
+  N       : dismiss the update banner
 """
 
 import argparse
 import json
 import os
+import re
 import sys
+import threading
 import time
+import urllib.request
+import webbrowser
 
 import numpy as np
 
@@ -95,6 +101,128 @@ def fatal(msg):
         except Exception:
             pass
     sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Auto-update: check GitHub Releases for a newer version and offer a one-click
+# download. Runs in a background thread; failures (offline, rate-limited) are
+# silently ignored so they never disrupt streaming.
+# ---------------------------------------------------------------------------
+
+APP_VERSION = "1.1.0"
+REPO = "phurteau/face-pixelate-cam"
+RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
+# How long the banner stays on screen (seconds) before auto-hiding, so it never
+# lingers on a Window-Capture stream.
+UPDATE_BANNER_SECONDS = 20
+
+
+def parse_version(text):
+    """Extract a comparable (major, minor, patch) tuple from e.g. 'v1.2.3'."""
+    nums = re.findall(r"\d+", text or "")
+    return tuple(int(n) for n in nums[:3])
+
+
+def is_newer(latest, current):
+    """True if version string `latest` is strictly newer than `current`."""
+    lv, cv = parse_version(latest), parse_version(current)
+    if not lv:
+        return False
+    n = max(len(lv), len(cv))
+    lv = lv + (0,) * (n - len(lv))
+    cv = cv + (0,) * (n - len(cv))
+    return lv > cv
+
+
+def fetch_latest_release(timeout=10):
+    """Query the GitHub Releases API. Returns {tag, html_url, zip_url} or None."""
+    url = f"https://api.github.com/repos/{REPO}/releases/latest"
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "face-pixelate-cam-updater",
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = json.load(r)
+    tag = data.get("tag_name", "")
+    html_url = data.get("html_url", RELEASES_PAGE)
+    zip_url = None
+    for a in data.get("assets", []):
+        if str(a.get("name", "")).lower().endswith(".zip"):
+            zip_url = a.get("browser_download_url")
+            break
+    if not zip_url:
+        zip_url = data.get("zipball_url")  # fallback: source zip
+    return {"tag": tag, "html_url": html_url, "zip_url": zip_url}
+
+
+def start_update_check(state):
+    """Kick off the version check in a daemon thread. Fills state['update']."""
+    def worker():
+        try:
+            info = fetch_latest_release()
+            if info and is_newer(info.get("tag", ""), APP_VERSION):
+                state["update"] = info
+        except Exception:
+            pass  # offline / rate-limited / API change -> just skip silently
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    return t
+
+
+def download_update(info, state):
+    """Download the release zip to the user's Downloads folder and reveal it.
+
+    Runs in its own thread so the video never freezes. Updates state['status']
+    with progress; falls back to opening the Releases page in a browser on any
+    error.
+    """
+    import shutil
+    import subprocess
+
+    def status(msg):
+        state["status"] = msg
+
+    try:
+        zip_url = info.get("zip_url")
+        if not zip_url:
+            raise ValueError("no download URL in release")
+        downloads = os.path.join(os.path.expanduser("~"), "Downloads")
+        if not os.path.isdir(downloads):
+            downloads = os.path.expanduser("~")
+        tag = (info.get("tag") or "latest").lstrip("v")
+        dest = os.path.join(downloads, f"face-pixelate-cam-{tag}.zip")
+
+        status("Downloading update...")
+        req = urllib.request.Request(
+            zip_url, headers={"User-Agent": "face-pixelate-cam-updater"})
+        with urllib.request.urlopen(req, timeout=60) as r, open(dest, "wb") as f:
+            shutil.copyfileobj(r, f)
+
+        state["downloaded_path"] = dest
+        status(f"Downloaded to {dest} - opening folder...")
+        if os.name == "nt":
+            try:
+                subprocess.Popen(["explorer", "/select,", dest])
+            except Exception:
+                pass
+        status(f"Saved to Downloads: face-pixelate-cam-{tag}.zip "
+               "(extract it and run setup.bat)")
+    except Exception as e:
+        status(f"Download failed ({e}); opening Releases page...")
+        try:
+            webbrowser.open(info.get("html_url", RELEASES_PAGE))
+        except Exception:
+            pass
+
+
+def start_download(info, state):
+    if state.get("downloading"):
+        return
+    state["downloading"] = True
+    t = threading.Thread(target=download_update, args=(info, state), daemon=True)
+    t.start()
+    return t
+
 
 DEFAULTS = {
     "block": 16,          # pixelation block size in px (bigger = chunkier)
@@ -341,10 +469,32 @@ def draw_button(frame, show_help):
     return frame
 
 
+def draw_update_banner(frame, text):
+    """Draw a bottom-of-frame update banner on the preview. Returns frame.
+
+    Drawn on the preview copy only (never on the virtual-camera output), so it
+    is stream-safe in virtual-camera mode. In Window-Capture (clean) mode it
+    auto-hides after UPDATE_BANNER_SECONDS.
+    """
+    h, w = frame.shape[:2]
+    bar_h = 30
+    y0 = h - bar_h
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, y0), (w, h), (30, 90, 30), -1)
+    cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)
+    cv2.circle(frame, (16, y0 + bar_h // 2), 5, (80, 240, 80), -1, cv2.LINE_AA)
+    cv2.putText(frame, text, (30, y0 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.putText(frame, text, (30, y0 + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                (255, 255, 255), 1, cv2.LINE_AA)
+    return frame
+
+
 def draw_help(frame, s, fps, using_vcam):
     lines = [
-        f"FPS {fps:4.1f}  | pixelate:{'ON' if s['pixelate_on'] else 'OFF'}  "
-        f"vcam:{'ON' if using_vcam else 'preview-only'}",
+        f"face-pixelate-cam v{APP_VERSION}  | "
+        f"pixelate:{'ON' if s['pixelate_on'] else 'OFF'}  "
+        f"vcam:{'ON' if using_vcam else 'preview-only'}  FPS {fps:4.1f}",
         f"block[{s['block']}] pad[{s['padding']:.2f}]  "
         f"bright[{s['brightness']:+.0f}] contr[{s['contrast']:.2f}] "
         f"sat[{s['saturation']:.2f}] warm[{s['warmth']:+.0f}] gamma[{s['gamma']:.2f}]",
@@ -376,6 +526,10 @@ def main():
                     help="Bare pixelated video only -- no button/overlay. Ideal "
                          "for capturing this window in OBS/Streamlabs via "
                          "'Window Capture' (no virtual camera needed).")
+    ap.add_argument("--no-update-check", action="store_true",
+                    help="Do not check GitHub for a newer version on launch.")
+    ap.add_argument("--version", action="version",
+                    version=f"face-pixelate-cam {APP_VERSION}")
     args = ap.parse_args()
 
     s = load_settings()
@@ -448,10 +602,17 @@ def main():
         cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback(WINDOW, on_mouse)
 
+    # Kick off the background update check (silent on failure/offline).
+    update_state = {"update": None, "dismissed": False, "downloading": False,
+                    "status": None, "first_seen": None}
+    if not args.no_update_check:
+        start_update_check(update_state)
+
     t_prev = time.time()
     fps = 0.0
 
-    print("Running. Close the window (X) or press 'q' to quit.")
+    print(f"Running face-pixelate-cam v{APP_VERSION}. "
+          "Close the window (X) or press 'q' to quit.")
     if args.clean:
         print("CLEAN mode: bare video for Window Capture. Press 'h' (or click the")
         print("top-left corner) to summon the settings overlay, 'h' again to hide.")
@@ -499,6 +660,26 @@ def main():
                     draw_button(disp, ui["show_overlay"])
                 elif not args.clean:
                     draw_button(disp, ui["show_overlay"])
+
+                # Update banner (drawn on the preview copy only -> never hits the
+                # virtual camera). Auto-hides after UPDATE_BANNER_SECONDS so it
+                # cannot linger on a Window-Capture stream.
+                upd = update_state["update"]
+                show_banner = False
+                if upd and not update_state["dismissed"]:
+                    if update_state["first_seen"] is None:
+                        update_state["first_seen"] = time.time()
+                    elapsed = time.time() - update_state["first_seen"]
+                    if update_state["status"]:
+                        banner = update_state["status"]
+                        show_banner = elapsed < (UPDATE_BANNER_SECONDS + 15)
+                    else:
+                        banner = (f"Update {upd.get('tag','')} available - "
+                                  "press U to download, N to dismiss")
+                        show_banner = elapsed < UPDATE_BANNER_SECONDS
+                    if show_banner:
+                        draw_update_banner(disp, banner)
+
                 cv2.imshow(WINDOW, disp)
                 key = cv2.waitKey(1) & 0xFF
 
@@ -507,6 +688,11 @@ def main():
                     break
                 if key in (ord('q'), 27):
                     break
+                elif key in (ord('u'), ord('U')):
+                    if upd and not update_state["dismissed"]:
+                        start_download(upd, update_state)
+                elif key in (ord('n'), ord('N')):
+                    update_state["dismissed"] = True
                 elif key == ord('h'):
                     ui["show_overlay"] = not ui["show_overlay"]
                 elif key == ord('p'):

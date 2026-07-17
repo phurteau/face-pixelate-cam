@@ -138,9 +138,29 @@ The overlay is **hidden by default** for a clean preview. Click the small
 | `p` | Toggle pixelation on/off (panic peek) |
 | `0` | Reset lighting to neutral |
 | `5` / `9` | Save / reload `settings.json` |
+| `U` / `N` | Download the update / dismiss the update banner (only shown when an update is available) |
 
 Your tweaks persist to **`settings.json`** (press **5** to save). Delete that
 file to return to defaults.
+
+---
+
+## Updates
+
+On launch the app quietly checks GitHub for a newer release (in the background -
+it never blocks video, and silently does nothing if you're offline). If a newer
+version exists, a green **banner** appears along the bottom of the window:
+
+> ● Update vX.Y.Z available - press **U** to download, **N** to dismiss
+
+- Press **`U`** for a one‑click download: it fetches the new release zip into
+  your **Downloads** folder and opens Explorer to it. Extract it and run
+  `setup.bat` to update.
+- Press **`N`** to dismiss. The banner also **auto‑hides after ~20 seconds** so
+  it never lingers on a stream, and it's drawn on the preview only (it never
+  appears on the virtual‑camera output).
+- Launch with `run.bat --no-update-check` (or `run-clean.bat --no-update-check`)
+  to skip the check entirely. Check your version with `run.bat --version`.
 
 ---
 
