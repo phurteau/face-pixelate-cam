@@ -221,13 +221,35 @@ def fatal(msg):
     sys.exit(1)
 
 
+def notify(title, msg):
+    """Non-fatal notification that works even with no console (pythonw launch).
+
+    Writes the message to run-log.txt and shows a non-blocking Windows message
+    box (on a background thread so it never freezes the video).
+    """
+    print(msg)
+    try:
+        with open(LOG_PATH, "w", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+    if os.name == "nt":
+        def _box():
+            try:
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(None, msg, title, 0x40)
+            except Exception:
+                pass
+        threading.Thread(target=_box, daemon=True).start()
+
+
 # ---------------------------------------------------------------------------
 # Auto-update: check GitHub Releases for a newer version and offer a one-click
 # download. Runs in a background thread; failures (offline, rate-limited) are
 # silently ignored so they never disrupt streaming.
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 REPO = "phurteau/face-pixelate-cam"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 # How long the banner stays on screen (seconds) before auto-hiding, so it never
@@ -715,6 +737,22 @@ def draw_update_banner(frame, text, th):
     return frame
 
 
+def draw_warn_banner(frame, text, th):
+    """Top-of-frame warning strip (neutral panel + accent edge). Preview only."""
+    w = frame.shape[1]
+    bar_h = 30
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, 0), (w, bar_h), th["panel2"], -1)
+    cv2.addWeighted(overlay, 0.9, frame, 0.1, 0, frame)
+    cv2.line(frame, (0, bar_h), (w, bar_h), th["acc2"], 2)
+    # Warning triangle glyph.
+    cv2.drawMarker(frame, (16, bar_h // 2), th["acc2"], cv2.MARKER_TRIANGLE_UP,
+                   14, 2, cv2.LINE_AA)
+    blit_text(frame, text + "   (press N to dismiss)", (32, 6), th["txt"],
+              size=14, outline=2)
+    return frame
+
+
 def draw_help(frame, s, fps, using_vcam, th):
     lines = [
         (f"face-pixelate-cam  v{APP_VERSION}", th["acc2"], True, 17),
@@ -1007,26 +1045,44 @@ def main():
 
     # Virtual camera.
     vcam = None
+    vcam_warn = None   # on-screen warning text if the virtual camera can't start
     if not args.no_vcam:
         if not HAVE_VCAM:
-            print("WARN: pyvirtualcam not installed; running preview-only.")
+            vcam_warn = "Virtual camera unavailable (pyvirtualcam not installed)."
+            print("WARN: " + vcam_warn)
         else:
             try:
                 vcam = pyvirtualcam.Camera(width=W, height=H, fps=args.fps,
                                            fmt=PixelFormat.BGR)
                 print(f"Virtual camera: {vcam.device}")
-                print(">>> In Streamlabs: add a 'Video Capture Device' and pick "
-                      "'OBS Virtual Camera'. <<<")
+                print(">>> In Teams / OBS / Streamlabs, pick the camera named "
+                      "'OBS Virtual Camera'. Keep this app running. <<<")
             except Exception as e:
-                print("WARN: could not start virtual camera:")
-                print(f"      {e}")
-                print("      This app publishes through the OBS Studio virtual")
-                print("      camera. Install OBS Studio (https://obsproject.com),")
-                print("      open it once, click Start Virtual Camera then Stop,")
-                print("      close OBS, and re-run. (Streamlabs' own virtual cam")
-                print("      is a different device and will NOT work here.)")
-                print("      Running preview-only for now.")
                 vcam = None
+                reason = (str(e).splitlines() or ["unknown error"])[0]
+                msg = (
+                    "face-pixelate-cam could NOT start the virtual camera, so it "
+                    "will not appear as a camera in Teams / OBS / Streamlabs.\n\n"
+                    f"Reason: {reason}\n\n"
+                    "This app publishes through the OBS Studio virtual camera, "
+                    "which must be installed and registered first:\n"
+                    "  1. Install OBS Studio  (https://obsproject.com)\n"
+                    "  2. Open OBS once, click 'Start Virtual Camera' then "
+                    "'Stop Virtual Camera'\n"
+                    "  3. Close OBS and launch this app again\n\n"
+                    "Then pick 'OBS Virtual Camera' in Teams/OBS/Streamlabs and "
+                    "keep this app running. (Streamlabs' own virtual camera is a "
+                    "different device and will NOT work here.)\n\n"
+                    "No virtual camera needed? Use run-clean.bat and add a "
+                    "'Window Capture' source instead. Run diagnose.bat for a "
+                    "full check."
+                )
+                print("WARN: " + msg)
+                # Windowless run.bat has no console, so surface this visibly.
+                notify("face-pixelate-cam - virtual camera unavailable", msg)
+                vcam_warn = ("Virtual camera OFF - OBS Virtual Camera not found. "
+                             "See the pop-up, or use run-clean.bat + Window "
+                             "Capture. (diagnose.bat for details)")
 
     # Guard against a no-op combo: nothing to show and nowhere to send frames.
     if args.no_preview and vcam is None:
@@ -1065,6 +1121,10 @@ def main():
                     "status": None, "first_seen": None}
     if not args.no_update_check:
         start_update_check(update_state)
+
+    # If the virtual camera failed to start, show a dismissable on-screen notice
+    # for a while (it also popped a message box). Auto-hides so it won't linger.
+    warn_state = {"text": vcam_warn, "dismissed": False, "first_seen": None}
 
     t_prev = time.time()
     fps = 0.0
@@ -1148,6 +1208,16 @@ def main():
                     if show_banner:
                         draw_update_banner(disp, banner, theme)
 
+                # Virtual-camera warning banner (top of frame). Shows for ~45s
+                # after launch if the vcam couldn't start, dismissable with 'n'.
+                if warn_state["text"] and not warn_state["dismissed"]:
+                    if warn_state["first_seen"] is None:
+                        warn_state["first_seen"] = time.time()
+                    if time.time() - warn_state["first_seen"] < 45:
+                        draw_warn_banner(disp, warn_state["text"], theme)
+                    else:
+                        warn_state["dismissed"] = True
+
                 cv2.imshow(WINDOW, disp)
                 key = cv2.waitKey(1) & 0xFF
 
@@ -1161,6 +1231,7 @@ def main():
                         start_download(upd, update_state)
                 elif key in (ord('n'), ord('N')):
                     update_state["dismissed"] = True
+                    warn_state["dismissed"] = True
                 elif key in (ord('t'), ord('T')):
                     ui["show_picker"] = not ui["show_picker"]
                     if not ui["show_picker"]:

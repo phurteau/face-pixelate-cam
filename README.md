@@ -91,19 +91,27 @@ can configure once and always stream bare.
 > overlay is showing, your capture would show it too - so hide it with `h`
 > before going live, or adjust during setup.)
 
-## Run - Method B: Virtual camera (appears as a "camera")
+## Run - Method B: Virtual camera (appears as a "camera" in Teams/OBS/Streamlabs)
 
-1. Do the one‑time **OBS Studio** step in Requirements #3 above.
+1. **Install OBS Studio first** - this step is required. The virtual camera is
+   provided by OBS's driver (see Requirements #3). Without OBS installed, the
+   camera cannot start and won't appear anywhere.
 2. Double‑click **`run.bat`**. A preview window opens (with a small corner
-   button) and the **virtual camera** starts. The console should print
-   `Virtual camera: OBS Virtual Camera`.
-3. In **Streamlabs**: **+ (Add Source) → Video Capture Device → Add → pick
-   "OBS Virtual Camera"**. Keep the app running the whole time.
+   button) and the **virtual camera** starts.
+   - If it can't start (OBS driver missing), a **pop‑up** now explains why and
+     a warning shows at the top of the preview - the reason is also written to
+     `run-log.txt`.
+3. Pick **"OBS Virtual Camera"** as your camera:
+   - **Microsoft Teams:** Settings → Devices → **Camera** → "OBS Virtual Camera"
+     (if Teams was already open, fully quit and reopen it so it re‑scans cameras).
+   - **OBS/Streamlabs:** Add Source → **Video Capture Device** → "OBS Virtual Camera".
+   - Keep **this app running** the whole time - the camera only exists while it's open.
 4. **To stop:** close the preview window (**X**) or press **q**. (The corner
    button shows/hides the settings overlay - it does not quit.)
 
 > Not seeing the camera? Run **`diagnose.bat`** - it tells you exactly why the
-> virtual camera won't start and saves the result to `diagnose-log.txt`.
+> virtual camera won't start and saves the result to `diagnose-log.txt`. If you
+> don't want to install OBS at all, use **Method A (Window Capture)** instead.
 
 ### Handy launch options
 
@@ -194,17 +202,18 @@ focus/active states - so any accent looks good against the neutral surfaces.
 
 ## Troubleshooting
 
-- **Can't get it to show as a camera in OBS/Streamlabs** → easiest fix: don't
-  use the virtual camera at all. Run **`run-clean.bat`** and add a **Window
-  Capture** source pointed at the "face-pixelate-cam (preview)" window. No
-  driver needed. (Use the virtual camera only if you specifically want a
-  *camera device*.)
-- **Streamlabs doesn't list the camera** (virtual‑cam method) → it appears as
-  **"OBS Virtual Camera"**, not "face-pixelate-cam". If it's missing entirely,
-  run **`diagnose.bat`** - it pinpoints why. Usual cause: OBS Studio's virtual
-  camera driver isn't registered (install OBS, Start/Stop Virtual Camera once).
-  Also make sure the app is **still running** - the camera only exists while it
-  is open.
+- **The virtual camera won't appear in Teams / OBS / Streamlabs** → it is
+  provided by **OBS Studio's** driver, so OBS Studio must be installed. Since
+  v1.3.1 the app tells you when the camera can't start: a **pop‑up** appears, a
+  warning shows at the top of the preview, and the reason is written to
+  `run-log.txt`. Fix: install OBS Studio, open it once, click **Start Virtual
+  Camera** then **Stop Virtual Camera**, close OBS, and re‑run. Then pick **"OBS
+  Virtual Camera"** as your camera. In **Teams**, fully quit and reopen it after
+  starting the app so it re‑scans cameras. Keep this app **running** the whole
+  time. Run **`diagnose.bat`** for a full check.
+- **Don't want to install OBS?** → skip the virtual camera entirely: run
+  **`run-clean.bat`** and add a **Window Capture** source pointed at the
+  "face-pixelate-cam (preview)" window. No driver needed.
 - **Window Capture shows black** → in the source's properties set **Capture
   Method → "Windows 10 (1903 and up)"**, and don't minimize the app window.
 - **"could not open camera index 0"** → another app is using the webcam, or the
