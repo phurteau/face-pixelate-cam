@@ -1,5 +1,9 @@
 # face-pixelate-cam
 
+<p align="center">
+  <img src="docs/app-icon.png" alt="face-pixelate-cam icon" width="128" height="128">
+</p>
+
 A portable Windows app that **pixelates only faces** in your webcam feed - the
 body and background stay untouched - so you can bring a face‑blurred camera into
 **OBS or Streamlabs**. Get it on screen two ways:
@@ -239,13 +243,18 @@ focus/active states - so any accent looks good against the neutral surfaces.
 ## Uninstall
 
 This app is **portable** - nothing is installed system‑wide (no registry, no
-Program Files, no Start‑menu entries). To remove it:
+Program Files, no Start‑menu entries, no driver). Its entire footprint is the
+app folder itself, plus any update `.zip` the auto‑updater saves to your
+**Downloads**. To remove it:
 
 - **Easiest:** just delete the whole `face-pixelate-cam` folder.
-- **Or run `uninstall.bat`**, which:
-  1. Removes generated files (`.venv`, `settings.json`, `__pycache__`,
-     `build`, `dist`, `*.spec`) - resetting the folder to just the source.
-  2. Then asks if you also want to **delete the entire folder** (`y` = full
+- **Or run `uninstall.bat`**, which fully cleans up in three steps:
+  1. Removes every generated file - `.venv`, `settings.json`, all logs
+     (`run-log.txt`, `setup-log.txt`, `diagnose-log.txt`), `__pycache__`,
+     `build`, `dist`, `*.spec` - resetting the folder to just the source.
+  2. Offers to delete any `face-pixelate-cam-*.zip` the updater left in your
+     **Downloads** (the only thing the app ever writes outside its own folder).
+  3. Then asks if you also want to **delete the entire folder** (`y` = full
      removal, including itself).
 
 > `uninstall.bat` does **not** remove the OBS/Streamlabs **Virtual Camera

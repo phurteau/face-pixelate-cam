@@ -196,6 +196,7 @@ else:
 SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
 MODEL_PATH = os.path.join(BUNDLE_DIR, "face_detection_yunet_2023mar.onnx")
 LOG_PATH = os.path.join(APP_DIR, "run-log.txt")
+ICON_PATH = os.path.join(BUNDLE_DIR, "app.ico")
 
 
 def fatal(msg):
@@ -243,13 +244,70 @@ def notify(title, msg):
         threading.Thread(target=_box, daemon=True).start()
 
 
+def set_window_icon(title):
+    """Best-effort: give the OpenCV preview window our own icon on Windows.
+
+    OpenCV's HighGUI has no API for a custom window icon, so we find the native
+    window by its title and attach app.ico via the Win32 WM_SETICON message (and
+    the window-class icon, so the taskbar button matches too). Fully guarded: on
+    any failure -- non-Windows, missing icon, window not up yet -- it simply
+    returns False and the caller retries next frame. Returns True once applied.
+    """
+    if os.name != "nt":
+        return True  # nothing to do; stop retrying
+    try:
+        if not os.path.exists(ICON_PATH):
+            return True  # no icon shipped; don't keep retrying
+        import ctypes
+        from ctypes import wintypes
+        u32 = ctypes.windll.user32
+        u32.FindWindowW.restype = wintypes.HWND
+        u32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+        u32.LoadImageW.restype = wintypes.HANDLE
+        u32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR,
+                                   wintypes.UINT, ctypes.c_int, ctypes.c_int,
+                                   wintypes.UINT]
+        u32.SendMessageW.restype = ctypes.c_void_p
+        u32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                     ctypes.c_void_p, ctypes.c_void_p]
+        hwnd = u32.FindWindowW(None, title)
+        if not hwnd:
+            return False  # window not created yet -- try again next frame
+        IMAGE_ICON = 1
+        LR_LOADFROMFILE = 0x00000010
+        WM_SETICON = 0x0080
+        ICON_SMALL, ICON_BIG = 0, 1
+        big = u32.LoadImageW(None, ICON_PATH, IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
+        small = u32.LoadImageW(None, ICON_PATH, IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+        if not (big or small):
+            return True  # couldn't load the icon; stop retrying
+        if big:
+            u32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, big)
+        if small:
+            u32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, small)
+        try:
+            setclass = getattr(u32, "SetClassLongPtrW", None) or u32.SetClassLongW
+            setclass.restype = ctypes.c_void_p
+            setclass.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+            GCLP_HICON, GCLP_HICONSM = -14, -34
+            if big:
+                setclass(hwnd, GCLP_HICON, big)
+            if small:
+                setclass(hwnd, GCLP_HICONSM, small)
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return True  # never let icon cosmetics interfere with the app
+
+
 # ---------------------------------------------------------------------------
 # Auto-update: check GitHub Releases for a newer version and offer a one-click
 # download. Runs in a background thread; failures (offline, rate-limited) are
 # silently ignored so they never disrupt streaming.
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.4.0"
 REPO = "phurteau/face-pixelate-cam"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 # How long the banner stays on screen (seconds) before auto-hiding, so it never
@@ -1128,6 +1186,7 @@ def main():
 
     t_prev = time.time()
     fps = 0.0
+    icon_applied = False
 
     print(f"Running face-pixelate-cam v{APP_VERSION}. "
           "Close the window (X) or press 'q' to quit.")
@@ -1220,6 +1279,10 @@ def main():
 
                 cv2.imshow(WINDOW, disp)
                 key = cv2.waitKey(1) & 0xFF
+
+                # Attach our custom icon once the native window exists (Windows).
+                if not icon_applied:
+                    icon_applied = set_window_icon(WINDOW)
 
                 # Quit if the window was closed via its X button.
                 if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:

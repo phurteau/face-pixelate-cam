@@ -19,9 +19,11 @@ REM pull in OpenCV's data files. No MediaPipe anymore.
 ".venv\Scripts\python.exe" -m PyInstaller ^
   --noconfirm --clean --onefile ^
   --name face-pixelate-cam ^
+  --icon app.ico ^
   --collect-data cv2 ^
   --hidden-import pyvirtualcam ^
   --add-data "face_detection_yunet_2023mar.onnx;." ^
+  --add-data "app.ico;." ^
   pixelate_cam.py
 
 echo.
