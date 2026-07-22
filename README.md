@@ -4,12 +4,12 @@
   <img src="docs/app-icon.png" alt="face-pixelate-cam icon" width="128" height="128">
 </p>
 
-A portable Windows app that **pixelates only faces** in your webcam feed - the
-body and background stay untouched - so you can bring a face‑blurred camera into
+A portable Windows app that **pixelates only faces** in your webcam feed. The
+body and background stay untouched, so you can bring a face-blurred camera into
 **OBS or Streamlabs**. Get it on screen two ways:
 
-- **Window Capture** (easiest - capture the app's window; no extra install), or
-- **Virtual camera** (appears as a camera device; needs the OBS virtual‑cam driver).
+- **Window Capture** (easiest: capture the app's window; no extra install), or
+- **Virtual camera** (appears as a camera device; needs the OBS virtual-cam driver).
 
 It also includes live **lighting** controls (brightness, contrast, saturation,
 warmth, gamma).
@@ -18,11 +18,11 @@ warmth, gamma).
 
 ## Download
 
-**[⬇️ Download the latest release (face-pixelate-cam.zip)](https://github.com/phurteau/face-pixelate-cam/releases/latest)**
+**[Download the latest release (face-pixelate-cam.zip)](https://github.com/phurteau/face-pixelate-cam/releases/latest)**
 
 1. Download and **extract** the zip.
-2. Double‑click **`setup.bat`** once (needs Python 3.9–3.14, 64‑bit).
-3. Double‑click **`run-clean.bat`** and add a **Window Capture** source in
+2. Double-click **`setup.bat`** once (needs Python 3.9–3.14, 64-bit).
+3. Double-click **`run-clean.bat`** and add a **Window Capture** source in
    OBS/Streamlabs (see below).
 
 *(Alternatively, use the green **Code ▸ Download ZIP** button for the latest
@@ -32,27 +32,27 @@ warmth, gamma).
 
 ## What it does
 
-- 🟦 **Face pixelation (faces only).** Detection runs on **every frame** with
+- **Face pixelation (faces only).** Detection runs on **every frame** with
   OpenCV's **YuNet** face detector, so the pixel block **follows your face**
   anywhere in the room and **resizes** as you move closer/farther. Handles
   **multiple faces**.
-- 🛡️ **Safety‑biased tracking.** Boxes are padded and a "hold last position"
+- **Safety-biased tracking.** Boxes are padded and a "hold last position"
   buffer keeps faces covered during **fast motion** or **profile angles** so a
   frame with an exposed face is very unlikely.
-- 💡 **Lighting:** brightness, contrast, saturation, warmth (white balance),
-  gamma - all adjustable live.
+- **Lighting:** brightness, contrast, saturation, warmth (white balance),
+  gamma, all adjustable live.
 
 ---
 
 ## Requirements on your personal PC
 
-1. **Python 3.9–3.14** (64‑bit). Install from
+1. **Python 3.9–3.14** (64-bit). Install from
    <https://www.python.org/downloads/> and tick **"Add Python to PATH"**.
-   Any current version works - including **3.13 / 3.14** - because face
+   Any current version works, including **3.13 / 3.14**, because face
    detection uses OpenCV YuNet (prebuilt wheels, no compiler, no MediaPipe).
 2. **The bundled model file** `face_detection_yunet_2023mar.onnx` must stay in
    the folder next to `pixelate_cam.py` (it's ~230 KB and ships with the app).
-3. **A way to get the video into your streaming app.** There are two options -
+3. **A way to get the video into your streaming app.** There are two options.
    **Window Capture is the easy one and needs no extra install:**
    - **Window Capture (recommended):** OBS and Streamlabs can capture the app's
      own window directly. **Nothing else to install.** ← start here
@@ -67,13 +67,13 @@ warmth, gamma).
 ## Setup (do this once)
 
 1. Copy the whole **`face-pixelate-cam`** folder to your personal PC.
-2. Double‑click **`setup.bat`**. It creates a local `.venv` and installs
+2. Double-click **`setup.bat`**. It creates a local `.venv` and installs
    everything (takes a few minutes the first time).
 
-## Run - Method A: Window Capture (recommended, no driver needed)
+## Run Method A: Window Capture (recommended, no driver needed)
 
-1. Double‑click **`run-clean.bat`**. A window opens showing your **bare
-   pixelated video** - no buttons or text, so it's clean to capture.
+1. Double-click **`run-clean.bat`**. A window opens showing your **bare
+   pixelated video**, no buttons or text, so it's clean to capture.
 2. In **OBS or Streamlabs**: **+ (Add Source) → Window Capture → Add new →**
    pick the window titled **"face-pixelate-cam (preview)"**.
    - If the capture looks black, set the Window Capture's **Capture Method** to
@@ -85,35 +85,35 @@ warmth, gamma).
 black console window.
 
 **To adjust settings (block size, brightness, etc.) in clean mode:** press
-**`h`** (or click the top‑left corner) to summon the controls overlay, change
+**`h`** (or click the top-left corner) to summon the controls overlay, change
 things with the hotkeys below, then press **`h`** again to go bare. Tip: press
-**`5`** to save your settings - `run-clean.bat` will reuse them next time, so you
+**`5`** to save your settings. `run-clean.bat` will reuse them next time, so you
 can configure once and always stream bare.
 
 > Keep the app window **open and not minimized** while streaming. You can move
 > it off to the side of your screen; Window Capture still grabs it. (While the
-> overlay is showing, your capture would show it too - so hide it with `h`
+> overlay is showing, your capture would show it too, so hide it with `h`
 > before going live, or adjust during setup.)
 
-## Run - Method B: Virtual camera (appears as a "camera" in Teams/OBS/Streamlabs)
+## Run Method B: Virtual camera (appears as a "camera" in Teams/OBS/Streamlabs)
 
-1. **Install OBS Studio first** - this step is required. The virtual camera is
+1. **Install OBS Studio first.** This step is required. The virtual camera is
    provided by OBS's driver (see Requirements #3). Without OBS installed, the
    camera cannot start and won't appear anywhere.
-2. Double‑click **`run.bat`**. A preview window opens (with a small corner
+2. Double-click **`run.bat`**. A preview window opens (with a small corner
    button) and the **virtual camera** starts.
-   - If it can't start (OBS driver missing), a **pop‑up** now explains why and
-     a warning shows at the top of the preview - the reason is also written to
+   - If it can't start (OBS driver missing), a **pop-up** now explains why and
+     a warning shows at the top of the preview. The reason is also written to
      `run-log.txt`.
 3. Pick **"OBS Virtual Camera"** as your camera:
    - **Microsoft Teams:** Settings → Devices → **Camera** → "OBS Virtual Camera"
-     (if Teams was already open, fully quit and reopen it so it re‑scans cameras).
+     (if Teams was already open, fully quit and reopen it so it re-scans cameras).
    - **OBS/Streamlabs:** Add Source → **Video Capture Device** → "OBS Virtual Camera".
-   - Keep **this app running** the whole time - the camera only exists while it's open.
+   - Keep **this app running** the whole time. The camera only exists while it's open.
 4. **To stop:** close the preview window (**X**) or press **q**. (The corner
-   button shows/hides the settings overlay - it does not quit.)
+   button shows/hides the settings overlay; it does not quit.)
 
-> Not seeing the camera? Run **`diagnose.bat`** - it tells you exactly why the
+> Not seeing the camera? Run **`diagnose.bat`**. It tells you exactly why the
 > virtual camera won't start and saves the result to `diagnose-log.txt`. If you
 > don't want to install OBS at all, use **Method A (Window Capture)** instead.
 
@@ -121,9 +121,9 @@ can configure once and always stream bare.
 
 | Command | Effect |
 |---|---|
-| `run-clean.bat` | **Window Capture mode** - bare video, no overlay, no virtual cam. |
-| `run.bat` | Virtual‑camera mode (camera 0, 1280×720). |
-| `run.bat --camera 1` / `run-clean.bat --camera 1` | Use a different webcam (try 1, 2, …). |
+| `run-clean.bat` | **Window Capture mode:** bare video, no overlay, no virtual cam. |
+| `run.bat` | Virtual-camera mode (camera 0, 1280×720). |
+| `run.bat --camera 1` / `run-clean.bat --camera 1` | Use a different webcam (try 1, 2, ...). |
 | `run-clean.bat --mirror` | Selfie/mirror view. |
 | `run.bat --width 1920 --height 1080 --fps 30` | Force a resolution. |
 | `run.bat --no-vcam` | Preview only (test without the virtual cam). |
@@ -134,15 +134,15 @@ can configure once and always stream bare.
 ## Hotkeys (focus the preview window)
 
 The overlay is **hidden by default** for a clean preview. Click the small
-**corner button** (top‑left) or press **`h`** to show/hide it.
+**corner button** (top-left) or press **`h`** to show/hide it.
 
 | Key | Action |
 |---|---|
 | `q` / `Esc` / close window (X) | Quit |
 | `h` / corner button | Show/hide the settings overlay |
-| `t` | Open the theme / accent color‑wheel picker |
-| `[` / `]` | Pixel block size - smaller / larger blocks |
-| `-` / `=` | Face padding - less / more safety margin |
+| `t` | Open the theme / accent color-wheel picker |
+| `[` / `]` | Pixel block size: smaller / larger blocks |
+| `-` / `=` | Face padding: less / more safety margin |
 | `b` / `B` | Brightness down / up |
 | `c` / `C` | Contrast down / up |
 | `s` / `S` | Saturation down / up |
@@ -160,18 +160,18 @@ file to return to defaults.
 
 ## Updates
 
-On launch the app quietly checks GitHub for a newer release (in the background -
+On launch the app quietly checks GitHub for a newer release (in the background,
 it never blocks video, and silently does nothing if you're offline). If a newer
 version exists, a green **banner** appears along the bottom of the window:
 
 ![Update banner shown at the bottom of the preview window](docs/update-banner.png)
 
-- Press **`U`** for a one‑click download: it fetches the new release zip into
+- Press **`U`** for a one-click download: it fetches the new release zip into
   your **Downloads** folder and opens Explorer to it. Extract it and run
   `setup.bat` to update.
-- Press **`N`** to dismiss. The banner also **auto‑hides after ~20 seconds** so
+- Press **`N`** to dismiss. The banner also **auto-hides after ~20 seconds** so
   it never lingers on a stream, and it's drawn on the preview only (it never
-  appears on the virtual‑camera output).
+  appears on the virtual-camera output).
 - Launch with `run.bat --no-update-check` (or `run-clean.bat --no-update-check`)
   to skip the check entirely. Check your version with `run.bat --version`.
 
@@ -179,11 +179,11 @@ version exists, a green **banner** appears along the bottom of the window:
 
 ## Theming & accent color
 
-The UI is a **token‑based, dual‑theme** system: a **true‑black dark** theme
-(default) plus a soft off‑white **light** theme, both with neutral‑gray panels.
-A single user‑chosen **accent** color drives *every* highlight - the corner
+The UI is a **token-based, dual-theme** system: a **true-black dark** theme
+(default) plus a soft off-white **light** theme, both with neutral-gray panels.
+A single user-chosen **accent** color drives *every* highlight: the corner
 button's active state, the version line, the update banner, the picker, and
-focus/active states - so any accent looks good against the neutral surfaces.
+focus/active states. Any accent looks good against the neutral surfaces.
 
 ![The accent color-wheel picker and themed overlay](docs/theme-picker.png)
 
@@ -208,12 +208,12 @@ focus/active states - so any accent looks good against the neutral surfaces.
 
 - **The virtual camera won't appear in Teams / OBS / Streamlabs** → it is
   provided by **OBS Studio's** driver, so OBS Studio must be installed. Since
-  v1.3.1 the app tells you when the camera can't start: a **pop‑up** appears, a
+  v1.3.1 the app tells you when the camera can't start: a **pop-up** appears, a
   warning shows at the top of the preview, and the reason is written to
   `run-log.txt`. Fix: install OBS Studio, open it once, click **Start Virtual
-  Camera** then **Stop Virtual Camera**, close OBS, and re‑run. Then pick **"OBS
+  Camera** then **Stop Virtual Camera**, close OBS, and re-run. Then pick **"OBS
   Virtual Camera"** as your camera. In **Teams**, fully quit and reopen it after
-  starting the app so it re‑scans cameras. Keep this app **running** the whole
+  starting the app so it re-scans cameras. Keep this app **running** the whole
   time. Run **`diagnose.bat`** for a full check.
 - **Don't want to install OBS?** → skip the virtual camera entirely: run
   **`run-clean.bat`** and add a **Window Capture** source pointed at the
@@ -229,11 +229,11 @@ focus/active states - so any accent looks good against the neutral surfaces.
   hold window (`hold_frames` in `settings.json`). Face detectors are weakest on
   full profiles; the padding + hold buffer cover the gap.
 - **Face gets exposed at the edge of the frame** → this is handled: detection
-  runs on a mirror‑padded frame so half‑off‑edge faces are still found, and the
+  runs on a mirror-padded frame so half-off-edge faces are still found, and the
   box is "glued" to the frame border so it can't leave an exposed sliver. If you
   push it (very fast exits), raise `hold_frames` or `padding` in `settings.json`.
 - **"YuNet model not found"** → the file `face_detection_yunet_2023mar.onnx`
-  must be in the same folder as `pixelate_cam.py`. Re‑download it from the
+  must be in the same folder as `pixelate_cam.py`. Re-download it from the
   OpenCV Zoo if it's missing.
 - **Low frame rate** → lower the resolution
   (`run.bat --width 960 --height 540`).
@@ -242,23 +242,23 @@ focus/active states - so any accent looks good against the neutral surfaces.
 
 ## Uninstall
 
-This app is **portable** - nothing is installed system‑wide (no registry, no
-Program Files, no Start‑menu entries, no driver). Its entire footprint is the
-app folder itself, plus any update `.zip` the auto‑updater saves to your
+This app is **portable**: nothing is installed system-wide (no registry, no
+Program Files, no Start-menu entries, no driver). Its entire footprint is the
+app folder itself, plus any update `.zip` the auto-updater saves to your
 **Downloads**. To remove it:
 
 - **Easiest:** just delete the whole `face-pixelate-cam` folder.
 - **Or run `uninstall.bat`**, which fully cleans up in three steps:
-  1. Removes every generated file - `.venv`, `settings.json`, all logs
+  1. Removes every generated file: `.venv`, `settings.json`, all logs
      (`run-log.txt`, `setup-log.txt`, `diagnose-log.txt`), `__pycache__`,
-     `build`, `dist`, `*.spec` - resetting the folder to just the source.
+     `build`, `dist`, `*.spec`. This resets the folder to just the source.
   2. Offers to delete any `face-pixelate-cam-*.zip` the updater left in your
      **Downloads** (the only thing the app ever writes outside its own folder).
   3. Then asks if you also want to **delete the entire folder** (`y` = full
      removal, including itself).
 
 > `uninstall.bat` does **not** remove the OBS/Streamlabs **Virtual Camera
-> driver** - that belongs to Streamlabs/OBS and other apps may use it. Remove
+> driver**. That belongs to Streamlabs/OBS and other apps may use it. Remove
 > it from Streamlabs/OBS if you no longer want it.
 
 ---
@@ -266,11 +266,11 @@ app folder itself, plus any update `.zip` the auto‑updater saves to your
 ## How the "faces only" part works
 
 Each frame, OpenCV's YuNet detector returns bounding boxes for detected faces.
-The app pixelates **only those rectangles** (down‑scale then nearest‑neighbor
-up‑scale), copying the blocks back over the face region. Every other pixel is
+The app pixelates **only those rectangles** (down-scale then nearest-neighbor
+up-scale), copying the blocks back over the face region. Every other pixel is
 the original frame, so your body and background are unchanged.
 
-**Edge handling:** detection runs on a mirror‑padded copy of the frame, so a
+**Edge handling:** detection runs on a mirror-padded copy of the frame, so a
 face that is half cut off at the border is still detected (its mirrored half
 completes it). Boxes near a border are extended to the frame edge, so a face
 moving out of frame is never briefly exposed at the very edge.
@@ -279,4 +279,4 @@ moving out of frame is never briefly exposed at the very edge.
 
 ## License
 
-MIT - see [LICENSE](LICENSE). Free to use, modify, and share.
+MIT. See [LICENSE](LICENSE). Free to use, modify, and share.
