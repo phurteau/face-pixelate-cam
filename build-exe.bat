@@ -1,7 +1,12 @@
 @echo off
 REM ============================================================
-REM  Build a standalone one-file EXE with PyInstaller.
-REM  Run AFTER setup.bat. Output: dist\face-pixelate-cam.exe
+REM  Build a standalone Windows app with PyInstaller (one folder).
+REM  Run AFTER setup.bat. Output: dist\face-pixelate-cam\
+REM
+REM  One-folder (--onedir), not one-file: on managed/corporate PCs
+REM  a one-file exe is often blocked by Application Control because
+REM  it unpacks unsigned DLLs to %TEMP%. The one-folder build keeps
+REM  the DLLs next to the exe and runs. Zip the whole folder to share.
 REM ============================================================
 setlocal
 cd /d "%~dp0"
@@ -14,10 +19,10 @@ if not exist ".venv\Scripts\python.exe" (
 
 ".venv\Scripts\python.exe" -m pip install pyinstaller -q
 
-REM Bundle the YuNet model next to the app inside the exe (--add-data), and
-REM pull in OpenCV's data files. No MediaPipe anymore.
+REM --windowed: no console window (this is a GUI app).
+REM --add-data bundles the YuNet model and the icon next to the app.
 ".venv\Scripts\python.exe" -m PyInstaller ^
-  --noconfirm --clean --onefile ^
+  --noconfirm --clean --onedir --windowed ^
   --name face-pixelate-cam ^
   --icon app.ico ^
   --collect-data cv2 ^
@@ -27,12 +32,12 @@ REM pull in OpenCV's data files. No MediaPipe anymore.
   pixelate_cam.py
 
 echo.
-if exist "dist\face-pixelate-cam.exe" (
+if exist "dist\face-pixelate-cam\face-pixelate-cam.exe" (
     echo === BUILD OK ===
-    echo EXE is at:  dist\face-pixelate-cam.exe
-    echo Copy that single file to any Windows PC that has the
-    echo OBS/Streamlabs Virtual Camera driver installed.
-    echo (The YuNet model is bundled inside the exe.)
+    echo App folder: dist\face-pixelate-cam\
+    echo Run it by double-clicking face-pixelate-cam.exe inside that folder.
+    echo Zip the whole folder to share it. To use the virtual camera,
+    echo the target PC needs OBS Studio installed. See the README.
 ) else (
     echo === BUILD FAILED === see messages above.
 )

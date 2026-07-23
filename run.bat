@@ -1,7 +1,9 @@
 @echo off
 REM ============================================================
-REM  face-pixelate-cam : launch the filter + virtual camera
-REM  Runs the app windowless (no console) using the local .venv.
+REM  face-pixelate-cam : launch the app
+REM  Opens the app window (video + a corner menu for all controls).
+REM  Runs windowless (no black console) using the local .venv.
+REM  Start the virtual camera from the panel when you want it.
 REM  You can pass extra options, e.g.:  run.bat --camera 1 --mirror
 REM  Startup errors are shown in a popup and saved to run-log.txt.
 REM ============================================================

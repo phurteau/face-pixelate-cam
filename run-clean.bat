@@ -1,11 +1,11 @@
 @echo off
 REM ============================================================
-REM  face-pixelate-cam : CLEAN mode for OBS/Streamlabs Window Capture
-REM  Opens a bare pixelated-video window (no button, no overlay) that
-REM  you capture with a "Window Capture" source. No virtual camera needed.
-REM  Runs windowless (no black console). Extra options still work,
-REM  e.g.:  run-clean.bat --camera 1 --mirror
-REM  Startup errors are shown in a popup and saved to run-log.txt.
+REM  face-pixelate-cam : launch (kept for back-compat)
+REM  Same as run.bat -- opens the app window. The old "clean" mode
+REM  is gone: the app shows the video full-window and the controls
+REM  live behind the corner menu, which auto-hides so a Window
+REM  Capture stays clean. Extra options still work, e.g.:
+REM     run-clean.bat --camera 1 --mirror
 REM ============================================================
 setlocal
 cd /d "%~dp0"
@@ -16,7 +16,5 @@ if not exist ".venv\Scripts\pythonw.exe" (
     exit /b 1
 )
 
-REM Launch with pythonw.exe (no console window) and exit this script so no
-REM black command window stays open while you stream.
-start "" ".venv\Scripts\pythonw.exe" pixelate_cam.py --clean --no-vcam %*
+start "" ".venv\Scripts\pythonw.exe" pixelate_cam.py %*
 exit /b 0

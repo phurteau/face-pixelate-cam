@@ -84,8 +84,8 @@ if %PIPRESULT% neq 0 (
 echo.
 echo ============================================================
 echo  === Setup complete! ===
-echo  To start: double-click  run-clean.bat  (for Window Capture)
-echo            or             run.bat        (for the virtual camera)
+echo  To start: double-click  run.bat
+echo  The app window opens; click the corner menu for all controls.
 echo ============================================================
 echo.
 echo This window will close automatically in 5 seconds...
