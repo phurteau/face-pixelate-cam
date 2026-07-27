@@ -244,7 +244,7 @@ def notify(title, msg):
 # silently ignored so they never disrupt streaming.
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.7.0"
 REPO = "phurteau/face-pixelate-cam"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 # How long the banner stays on screen (seconds) before auto-hiding, so it never
@@ -562,6 +562,14 @@ def apply_lighting(frame, s, gamma_lut):
     return out
 
 
+def _fourcc(code):
+    """FOURCC int for a 4-char codec, computed directly so it works across
+    OpenCV versions regardless of the cv2.VideoWriter_fourcc symbol."""
+    code = (str(code) + "    ")[:4]
+    return (ord(code[0]) | (ord(code[1]) << 8)
+            | (ord(code[2]) << 16) | (ord(code[3]) << 24))
+
+
 def pixelate_region(frame, x0, y0, x1, y1, block):
     """Pixelate only the rectangle [x0:x1, y0:y1]. Returns frame."""
     h, w = frame.shape[:2]
@@ -819,6 +827,7 @@ class VideoEngine:
         self._req_res = (int(args.width), int(args.height))
         self._applied_res = None
         self.cam_error = None
+        self.capture_info = None      # negotiated capture format, for diagnostics
 
         self._want_vcam = False       # off by default; started from the panel
         self._vcam = None
@@ -869,13 +878,46 @@ class VideoEngine:
             self._cam_index = index
             self._applied_res = (w, h)
             return None
-        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW if os.name == "nt" else 0)
+        backend = cv2.CAP_DSHOW if os.name == "nt" else 0
+        cap = cv2.VideoCapture(index, backend)
+        # Force MJPG BEFORE setting the frame size. USB webcams default to
+        # uncompressed YUY2; at 720p/1080p that stream exceeds USB 2.0 bandwidth,
+        # so the camera can't deliver frames on time and the video visibly lags
+        # (only 640 stays 1:1). MJPG is compressed, letting the camera push
+        # high-res at full FPS. --no-mjpg disables this for cameras that refuse it.
+        if not getattr(self.args, "no_mjpg", False):
+            cap.set(cv2.CAP_PROP_FOURCC, _fourcc("MJPG"))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
         cap.set(cv2.CAP_PROP_FPS, self.args.fps)
+        # Keep only the newest frame so end-to-end latency can't accumulate.
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
         self._cam_index = index
         self._applied_res = (w, h)
+        self.capture_info = self._read_capture_format(cap)
         return cap
+
+    def _read_capture_format(self, cap):
+        """Read back and log what the camera actually negotiated. This is the
+        blind-fix diagnostic: it tells us whether MJPG stuck and at what FPS."""
+        try:
+            raw = int(cap.get(cv2.CAP_PROP_FOURCC))
+            codec = "".join(chr((raw >> (8 * i)) & 0xFF) for i in range(4))
+            codec = "".join(c for c in codec if c.isprintable()).strip() or "?"
+            aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            afps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+            info = "capture: %s %dx%d @ %gfps" % (codec, aw, ah, afps)
+        except Exception as e:
+            info = "capture: (format query failed: %s)" % e
+        try:
+            print("[pixelate-cam] " + info, file=sys.stderr, flush=True)
+        except Exception:
+            pass
+        return info
 
     def _synthetic_frame(self):
         w, h = self._req_res
@@ -1649,6 +1691,11 @@ def main():
                          "on; boxes are scaled back to the full frame. Keeps "
                          "detection cost constant across resolutions so higher "
                          "resolutions don't lag. Use 0 to detect at native size.")
+    ap.add_argument("--no-mjpg", action="store_true",
+                    help="Do not force MJPG capture; use the camera's default "
+                         "pixel format. MJPG is on by default so 720p/1080p "
+                         "capture fits USB bandwidth and doesn't lag. Only use "
+                         "this if your camera refuses MJPG at your resolution.")
     ap.add_argument("--no-vcam", action="store_true",
                     help="Do not start the virtual camera automatically. You can "
                          "still start it from the controls, or just capture this "
