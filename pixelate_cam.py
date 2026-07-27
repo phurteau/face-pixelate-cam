@@ -586,7 +586,8 @@ def pixelate_region(frame, x0, y0, x1, y1, block):
 # ---------------------------------------------------------------------------
 
 class FaceTracker:
-    def __init__(self, model_path, min_confidence, hold_frames):
+    def __init__(self, model_path, min_confidence, hold_frames,
+                 detect_max_side=640):
         if not os.path.exists(model_path):
             raise FileNotFoundError(
                 f"YuNet model not found: {model_path}\n"
@@ -601,6 +602,12 @@ class FaceTracker:
             top_k=5000,
         )
         self.hold_frames = hold_frames
+        # Longest side (px) of the image YuNet actually runs on. Detection cost
+        # scales with pixel count, so we cap the detection resolution here and
+        # scale the resulting boxes back up to the full frame. This keeps the
+        # per-frame detection cost roughly constant whether the camera runs at
+        # 360p, 720p or 1080p (0 disables the cap and detects at native size).
+        self.detect_max_side = int(detect_max_side) if detect_max_side else 0
         self.last_boxes = []      # list of (x0,y0,x1,y1)
         self.lost_count = 0
         # Reflect-border fraction added around the frame before detection so
@@ -613,14 +620,35 @@ class FaceTracker:
     def detect(self, frame_bgr, padding):
         h, w = frame_bgr.shape[:2]
 
-        # Reflect-pad the frame before detection. A face that is half cut off at
-        # the frame edge becomes a more complete face in the mirrored border, so
-        # YuNet can still detect it (this is the key fix for edge faces that
-        # would otherwise go undetected and expose the face).
-        bx_pad = int(round(w * self.detect_pad))
-        by_pad = int(round(h * self.detect_pad))
+        # Cap the resolution we actually feed to YuNet. Running the detector on
+        # a full 1080p frame (plus the reflect border below) means pushing a
+        # ~2880x1620 image through the CNN every frame -- roughly 9x the work of
+        # 360p -- which is what stalls the video at higher resolutions. Instead
+        # we detect on a downscaled copy and scale the boxes back to full size.
+        # Face boxes are padded and safety-held, so the coarser localization is
+        # not noticeable in the output.
+        long_side = max(h, w)
+        scale = 1.0
+        if self.detect_max_side and long_side > self.detect_max_side:
+            scale = self.detect_max_side / float(long_side)
+        if scale < 1.0:
+            det = cv2.resize(
+                frame_bgr,
+                (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+                interpolation=cv2.INTER_AREA)
+        else:
+            det = frame_bgr
+        dh, dw = det.shape[:2]
+        inv = 1.0 / scale   # maps detection-space coords back to full frame
+
+        # Reflect-pad the (downscaled) frame before detection. A face that is
+        # half cut off at the frame edge becomes a more complete face in the
+        # mirrored border, so YuNet can still detect it (this is the key fix for
+        # edge faces that would otherwise go undetected and expose the face).
+        bx_pad = int(round(dw * self.detect_pad))
+        by_pad = int(round(dh * self.detect_pad))
         padded = cv2.copyMakeBorder(
-            frame_bgr, by_pad, by_pad, bx_pad, bx_pad, cv2.BORDER_REFLECT)
+            det, by_pad, by_pad, bx_pad, bx_pad, cv2.BORDER_REFLECT)
         ph, pw = padded.shape[:2]
         self.detector.setInputSize((pw, ph))
         _, faces = self.detector.detect(padded)
@@ -629,11 +657,12 @@ class FaceTracker:
         if faces is not None:
             for f in faces:
                 # YuNet row: x, y, w, h, then 5 landmarks (10 vals), then score.
-                # Map from padded coords back to the original frame.
-                bx = float(f[0]) - bx_pad
-                by = float(f[1]) - by_pad
-                bw = float(f[2])
-                bh = float(f[3])
+                # Map from padded detection coords back to the full-res frame
+                # (subtract the border, then undo the detection downscale).
+                bx = (float(f[0]) - bx_pad) * inv
+                by = (float(f[1]) - by_pad) * inv
+                bw = float(f[2]) * inv
+                bh = float(f[3]) * inv
 
                 # Keep only faces whose center lands within (or right at) the
                 # real frame. This discards pure mirror-reflection detections
@@ -776,7 +805,8 @@ class VideoEngine:
         self.args = args
         self.s = s
         # Fails fast with a clear message if the YuNet model is missing.
-        self.tracker = FaceTracker(MODEL_PATH, s["min_confidence"], s["hold_frames"])
+        self.tracker = FaceTracker(MODEL_PATH, s["min_confidence"], s["hold_frames"],
+                                   detect_max_side=getattr(args, "detect_size", 640))
 
         self._lock = threading.Lock()
         self._frame = None            # latest processed BGR frame (read-only once stored)
@@ -1614,6 +1644,11 @@ def main():
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)
     ap.add_argument("--fps", type=int, default=30)
+    ap.add_argument("--detect-size", type=int, default=640,
+                    help="Longest side (px) of the image face detection runs "
+                         "on; boxes are scaled back to the full frame. Keeps "
+                         "detection cost constant across resolutions so higher "
+                         "resolutions don't lag. Use 0 to detect at native size.")
     ap.add_argument("--no-vcam", action="store_true",
                     help="Do not start the virtual camera automatically. You can "
                          "still start it from the controls, or just capture this "
