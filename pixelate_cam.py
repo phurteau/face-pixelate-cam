@@ -244,7 +244,7 @@ def notify(title, msg):
 # silently ignored so they never disrupt streaming.
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.1"
+APP_VERSION = "1.9.0"
 REPO = "phurteau/face-pixelate-cam"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 # How long the banner stays on screen (seconds) before auto-hiding, so it never
@@ -374,7 +374,14 @@ DEFAULTS = {
     "theme": "dark",       # "dark" (default) or "light"
     "accent": "#025500",   # single accent that drives all UI highlights
     "capture_format": "Auto",  # "Auto" (prefer MJPG) | "MJPG" | "YUY2"
+    "target_fps": 60,      # requested capture + virtual-camera frame rate (30/60)
 }
+
+# Run the face-detection CNN only every Nth captured frame and reuse the padded,
+# held boxes in between. Detection is the biggest constant per-frame cost (~15ms);
+# faces move little in 1/30-1/60 s and the boxes are padded + edge-glued + held, so
+# reusing them for a frame is invisible. This roughly halves amortized detect cost.
+DETECT_STRIDE = 2
 
 # Clamp ranges for each adjustable setting.
 RANGES = {
@@ -625,6 +632,24 @@ class FaceTracker:
         # How close (fraction of face size) a face must be to an edge before we
         # extend its pixelation box out past that edge.
         self.edge_margin = 0.15
+        # Detect stride: run the CNN every Nth call and reuse the returned boxes
+        # in between (see DETECT_STRIDE). _call_no counts detect_strided() calls;
+        # _strided_boxes holds the most recent real detection to reuse.
+        self.detect_every = max(1, int(DETECT_STRIDE))
+        self._call_no = 0
+        self._strided_boxes = []
+
+    def detect_strided(self, frame_bgr, padding):
+        """Amortized detect: run the real CNN on stride frames, otherwise reuse
+        the last boxes. Cuts detection cost ~in half at stride 2 with no visible
+        change (boxes are padded + edge-glued + safety-held). Returns the same
+        (x0,y0,x1,y1) list shape as detect()."""
+        self._call_no += 1
+        if (self.detect_every <= 1
+                or (self._call_no % self.detect_every) == 1
+                or not self._strided_boxes):
+            self._strided_boxes = self.detect(frame_bgr, padding)
+        return self._strided_boxes
 
     def detect(self, frame_bgr, padding):
         h, w = frame_bgr.shape[:2]
@@ -830,8 +855,22 @@ class VideoEngine:
         self._req_fmt = (getattr(args, "capture_format", None)
                          or s.get("capture_format", "Auto"))
         self._applied_fmt = None
+        _seed_fps = getattr(args, "fps", None)
+        self._req_fps = int(_seed_fps) if _seed_fps else int(s.get("target_fps", 60))
+        self._applied_fps = None
         self.cam_error = None
         self.capture_info = None      # negotiated capture format, for diagnostics
+
+        # Threaded drop-to-latest capture. A dedicated reader thread owns the cap
+        # and grabs frames as fast as the device delivers them, publishing only
+        # the NEWEST raw frame plus a generation counter. The processor consumes
+        # the latest and drops any backlog, so end-to-end latency stays bounded to
+        # ~one process cycle (kills "lag") and decode overlaps processing.
+        self._raw = None              # newest raw BGR frame from the reader
+        self._raw_gen = 0             # bumps on every published frame
+        self._rlock = threading.Lock()
+        self._reader_thread = None
+        self._vcam_params = None      # (w, h, fps) the live vcam was built for
 
         self._want_vcam = False       # off by default; started from the panel
         self._vcam = None
@@ -863,6 +902,8 @@ class VideoEngine:
 
     def stop(self):
         self._stop.set()
+        if self._reader_thread:
+            self._reader_thread.join(timeout=1.5)
         if self._thread:
             self._thread.join(timeout=1.5)
 
@@ -875,6 +916,11 @@ class VideoEngine:
 
     def request_format(self, fmt):
         self._req_fmt = str(fmt)
+
+    def request_fps(self, fps):
+        # Floor at 30 (the user's minimum); the reader reopens the cap and the
+        # processor rebuilds the vcam when this changes.
+        self._req_fps = max(30, int(fps))
 
     def set_vcam_enabled(self, on):
         if on and not HAVE_VCAM:
@@ -895,6 +941,7 @@ class VideoEngine:
             self._cam_index = index
             self._applied_res = (w, h)
             self._applied_fmt = self._req_fmt
+            self._applied_fps = self._req_fps
             return None
         target = self._target_codec()
         cap = self._negotiate_capture(index, w, h, target)
@@ -907,6 +954,7 @@ class VideoEngine:
         self._cam_index = index
         self._applied_res = (w, h)
         self._applied_fmt = self._req_fmt
+        self._applied_fps = self._req_fps
         self.capture_info = self._read_capture_format(cap)
         return cap
 
@@ -976,7 +1024,7 @@ class VideoEngine:
             except Exception:
                 pass
         try:
-            cap.set(cv2.CAP_PROP_FPS, self.args.fps)
+            cap.set(cv2.CAP_PROP_FPS, self._req_fps)
         except Exception:
             pass
 
@@ -1026,26 +1074,44 @@ class VideoEngine:
         cv2.ellipse(frame, (cx, cy), (110, 150), 0, 0, 360, (150, 170, 200), -1)
         cv2.circle(frame, (cx - 40, cy - 45), 16, (60, 60, 60), -1)
         cv2.circle(frame, (cx + 40, cy - 45), 16, (60, 60, 60), -1)
-        time.sleep(1.0 / max(1, self.args.fps))
+        time.sleep(1.0 / max(1, self._req_fps))
         return frame
 
-    def _run(self):
+    def _reader_guarded(self):
+        # Mirror of _run_guarded for the capture thread: any exception that
+        # escapes the reader becomes a visible camera error instead of a silent
+        # dead thread and a stuck "Starting camera..." overlay.
+        try:
+            self._reader_loop()
+        except Exception as e:
+            self.cam_error = "Camera error: %s" % (
+                (str(e).splitlines() or ["unknown"])[0])
+
+    def _reader_loop(self):
+        """Own the capture device and publish only the newest raw frame.
+
+        Runs on its own daemon thread so a (potentially blocking, high-res)
+        cap.read() overlaps face processing on the worker thread instead of
+        serializing with it -- that overlap is what lets 1080p keep up. Only the
+        latest frame is kept; older frames are overwritten before the processor
+        sees them, so end-to-end latency can't accumulate (the "lag"). Camera /
+        resolution / format / FPS changes are applied here by reopening the SAME
+        tested _open_camera path, so the v1.8.1 camera-start fix is untouched."""
         cap = self._open_camera(self._req_cam, *self._req_res)
         if cap is not None and not cap.isOpened():
             self.cam_error = f"Could not open camera index {self._req_cam}."
-        t_prev = time.time()
 
         while not self._stop.is_set():
-            # Apply pending camera / resolution changes.
+            # Apply pending camera / resolution / format / fps changes.
             if (self._req_cam != self._cam_index
                     or self._req_res != self._applied_res
-                    or self._req_fmt != self._applied_fmt):
+                    or self._req_fmt != self._applied_fmt
+                    or self._req_fps != self._applied_fps):
                 if cap is not None:
                     try:
                         cap.release()
                     except Exception:
                         pass
-                self._close_vcam()      # size may change; recreate on demand
                 cap = self._open_camera(self._req_cam, *self._req_res)
                 if cap is not None and not cap.isOpened():
                     self.cam_error = f"Could not open camera index {self._req_cam}."
@@ -1053,7 +1119,8 @@ class VideoEngine:
                     continue
                 self.cam_error = None
 
-            # Grab a frame (or synthesize one in test mode).
+            # Grab a frame (or synthesize one in test mode; the synth path paces
+            # itself to _req_fps so the reader doesn't spin).
             if self.args.test_pattern:
                 frame = self._synthetic_frame()
                 ok = True
@@ -1069,6 +1136,43 @@ class VideoEngine:
                 continue
             self.cam_error = None
 
+            # Publish the newest frame; the processor drops any it missed.
+            with self._rlock:
+                self._raw = frame
+                self._raw_gen += 1
+
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+
+    def _run(self):
+        # Start the capture reader; it owns the device and feeds newest frames.
+        self._reader_thread = threading.Thread(target=self._reader_guarded,
+                                               daemon=True)
+        self._reader_thread.start()
+
+        t_prev = time.time()
+        last_gen = -1
+
+        while not self._stop.is_set():
+            # Drop-to-latest: pull the newest raw frame. If nothing new arrived
+            # since we last processed, yield briefly instead of reprocessing --
+            # output stays in lock-step with the camera, which is what removes the
+            # lag at high resolution.
+            with self._rlock:
+                frame = self._raw
+                gen = self._raw_gen
+            if frame is None or gen == last_gen:
+                time.sleep(0.001)
+                continue
+            last_gen = gen
+            # apply_lighting returns the SAME array at default settings and we
+            # mutate below (mirror flip / pixelation writes in place), so copy
+            # before touching the reader's buffer.
+            frame = frame.copy()
+
             if self.s.get("mirror"):
                 frame = cv2.flip(frame, 1)
 
@@ -1078,18 +1182,20 @@ class VideoEngine:
                 self._gamma_lut = build_gamma_lut(self._gamma_val)
             frame = apply_lighting(frame, self.s, self._gamma_lut)
 
-            # 2) Face pixelation (faces only).
+            # 2) Face pixelation (faces only). Detection is strided: the CNN runs
+            # every Nth frame and the padded/held boxes are reused in between.
             if self.s["pixelate_on"]:
-                for (x0, y0, x1, y1) in self.tracker.detect(frame, self.s["padding"]):
+                for (x0, y0, x1, y1) in self.tracker.detect_strided(
+                        frame, self.s["padding"]):
                     pixelate_region(frame, x0, y0, x1, y1, self.s["block"])
 
             h, w = frame.shape[:2]
             self.frame_w, self.frame_h = w, h
 
-            # 3) Virtual camera (create/destroy on demand, then send).
+            # 3) Virtual camera (create / rebuild / destroy on demand, then send).
             self._service_vcam(frame, w, h)
 
-            # FPS meter.
+            # FPS meter (measured processed-frame rate; shown live in the drawer).
             now = time.time()
             dt = now - t_prev
             t_prev = now
@@ -1099,22 +1205,25 @@ class VideoEngine:
             with self._lock:
                 self._frame = frame
 
-            if self._vcam is None and not self.args.test_pattern:
-                time.sleep(0.001)   # yield; keep CPU sane without vcam pacing
+            if self._vcam is None:
+                time.sleep(0.001)   # yield; vcam.sleep_until_next_frame paces when on
 
-        if cap is not None:
-            try:
-                cap.release()
-            except Exception:
-                pass
         self._close_vcam()
 
     def _service_vcam(self, frame, w, h):
+        fps = int(self._req_fps)
+        # Self-heal: rebuild the virtual camera if the frame size or the
+        # requested fps changed under it (resolution or Frame-rate switch). The
+        # reader thread no longer touches the vcam -- the processor owns it here,
+        # driven by the actual delivered frame dimensions.
+        if self._vcam is not None and self._vcam_params != (w, h, fps):
+            self._close_vcam()
         if self._want_vcam and self._vcam is None and HAVE_VCAM:
             try:
                 self._vcam = pyvirtualcam.Camera(width=w, height=h,
-                                                 fps=self.args.fps,
+                                                 fps=fps,
                                                  fmt=PixelFormat.BGR)
+                self._vcam_params = (w, h, fps)
                 self.vcam_active = True
                 self.vcam_status = "on"
                 self.vcam_error = None
@@ -1146,6 +1255,7 @@ class VideoEngine:
             except Exception:
                 pass
         self._vcam = None
+        self._vcam_params = None
         self.vcam_active = False
         if self.vcam_status == "on":
             self.vcam_status = "off"
@@ -1175,6 +1285,9 @@ RES_BY_ASPECT = {
 # high-res, no lag) and falls back if the camera refuses; "MJPG" forces
 # compressed; "YUY2" forces uncompressed for cameras that misbehave on MJPG.
 FORMAT_CHOICES = ["Auto", "MJPG", "YUY2"]
+# Requested frame rate. 60 is preferred; the camera may deliver fewer at high
+# resolution (the live readout next to the menu shows the measured rate).
+FPS_CHOICES = ["30", "60", "90", "120"]
 # Some drivers report YUY2 under its FOURCC synonym YUYV; treat them as equal.
 _FMT_MATCH = {"MJPG": ("MJPG",), "YUY2": ("YUY2", "YUYV")}
 _ASPECT_RATIOS = {"16:9": 16 / 9, "4:3": 4 / 3, "16:10": 16 / 10}
@@ -1433,6 +1546,24 @@ class App:
         self._reg(om, "option")
         self._menus.append(om["menu"])
 
+        # Frame rate: request 30/60/90/120 fps. The camera clamps to the highest
+        # rate it actually supports at the chosen resolution; the label to the left
+        # of the menu shows the measured processed-frame rate live, so the user can
+        # confirm they are clearing 30 and see what a given resolution/cam sustains.
+        row = self._row(parent)
+        self._label(row, "Frame rate").pack(side="left")
+        self.var_fps = tk.StringVar(value=str(int(self.s.get("target_fps", 60))))
+        om = tk.OptionMenu(row, self.var_fps, *FPS_CHOICES,
+                           command=self._on_fps)
+        om.configure(relief="flat", bd=0, highlightthickness=0,
+                     font=("Segoe UI", 10), cursor="hand2", width=10)
+        om.pack(side="right")
+        self._reg(om, "option")
+        self._menus.append(om["menu"])
+        self.lbl_fps = self._label(row, "-- fps", role="dim")
+        self.lbl_fps.configure(padx=10)
+        self.lbl_fps.pack(side="right")
+
         self.var_mirror = tk.BooleanVar(value=bool(self.s.get("mirror")))
         cb = tk.Checkbutton(self._row(parent), text="Mirror (selfie view)",
                             variable=self.var_mirror, command=self._on_mirror,
@@ -1646,6 +1777,10 @@ class App:
         self.s["capture_format"] = str(value)
         self.engine.request_format(value)
 
+    def _on_fps(self, value):
+        self.s["target_fps"] = int(value)
+        self.engine.request_fps(int(value))
+
     def _on_mirror(self):
         self.s["mirror"] = bool(self.var_mirror.get())
 
@@ -1680,6 +1815,8 @@ class App:
         self.var_mirror.set(self.s.get("mirror", False))
         self.var_fmt.set(self.s.get("capture_format", "Auto"))
         self.engine.request_format(self.s.get("capture_format", "Auto"))
+        self.var_fps.set(str(int(self.s.get("target_fps", 60))))
+        self.engine.request_fps(int(self.s.get("target_fps", 60)))
         self.pal = _tk_palette(self.s["theme"], self.s["accent"])
         self.btn_theme.configure(text=f"Theme: {self.s['theme']}")
         self.var_val.set(self._accent_value() * 100)
@@ -1833,6 +1970,10 @@ class App:
             self.lbl_vcam.configure(text="Off", fg=self.pal["dim"])
             self.btn_vcam.configure(text="Start Virtual Camera")
 
+        # Live measured processed-frame rate (blank until the first frames flow).
+        fps = getattr(eng, "fps", 0.0)
+        self.lbl_fps.configure(text=(f"{fps:.0f} fps" if fps >= 1 else "-- fps"))
+
         upd = self.update_state.get("update")
         if upd and not self.update_state.get("dismissed"):
             status = self.update_state.get("status")
@@ -1866,7 +2007,10 @@ def main():
     ap.add_argument("--camera", type=int, default=0, help="Webcam index (default 0)")
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)
-    ap.add_argument("--fps", type=int, default=30)
+    ap.add_argument("--fps", type=int, default=None,
+                    help="Requested capture + virtual-camera frame rate "
+                         "(persists to settings). Default 60; the camera may "
+                         "deliver fewer at high resolution. Floored at 30.")
     ap.add_argument("--detect-size", type=int, default=640,
                     help="Longest side (px) of the image face detection runs "
                          "on; boxes are scaled back to the full frame. Keeps "
@@ -1923,7 +2067,12 @@ def main():
     elif args.no_mjpg:
         s["capture_format"] = "YUY2"   # this run only; not persisted below
     args.capture_format = s.get("capture_format", "Auto")
-    if args.accent or args.theme or args.mirror or args.format:
+    # Frame-rate precedence: --fps (explicit, persisted) > saved target_fps > 60.
+    fps_explicit = args.fps is not None
+    if fps_explicit:
+        s["target_fps"] = max(30, int(args.fps))
+    args.fps = int(s.get("target_fps", 60))
+    if args.accent or args.theme or args.mirror or args.format or fps_explicit:
         save_settings(s)
 
     try:
