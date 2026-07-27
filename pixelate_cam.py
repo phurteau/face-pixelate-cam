@@ -244,7 +244,7 @@ def notify(title, msg):
 # silently ignored so they never disrupt streaming.
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 REPO = "phurteau/face-pixelate-cam"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 # How long the banner stays on screen (seconds) before auto-hiding, so it never
@@ -878,35 +878,118 @@ class VideoEngine:
             self._cam_index = index
             self._applied_res = (w, h)
             return None
-        backend = cv2.CAP_DSHOW if os.name == "nt" else 0
-        cap = cv2.VideoCapture(index, backend)
-        # Force MJPG BEFORE setting the frame size. USB webcams default to
-        # uncompressed YUY2; at 720p/1080p that stream exceeds USB 2.0 bandwidth,
-        # so the camera can't deliver frames on time and the video visibly lags
-        # (only 640 stays 1:1). MJPG is compressed, letting the camera push
-        # high-res at full FPS. --no-mjpg disables this for cameras that refuse it.
-        if not getattr(self.args, "no_mjpg", False):
-            cap.set(cv2.CAP_PROP_FOURCC, _fourcc("MJPG"))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-        cap.set(cv2.CAP_PROP_FPS, self.args.fps)
+        want_mjpg = not getattr(self.args, "no_mjpg", False)
+        cap = self._negotiate_capture(index, w, h, want_mjpg)
         # Keep only the newest frame so end-to-end latency can't accumulate.
-        try:
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        except Exception:
-            pass
+        if cap is not None:
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
         self._cam_index = index
         self._applied_res = (w, h)
         self.capture_info = self._read_capture_format(cap)
         return cap
 
-    def _read_capture_format(self, cap):
-        """Read back and log what the camera actually negotiated. This is the
-        blind-fix diagnostic: it tells us whether MJPG stuck and at what FPS."""
+    def _negotiate_capture(self, index, w, h, want_mjpg):
+        """Open the camera and make MJPG actually stick.
+
+        Windows USB webcams default to uncompressed YUY2. At 720p/1080p that
+        either exceeds USB 2.0 bandwidth or drops the camera to a few FPS, which
+        shows up as lag (only 640 stays 1:1). The fix is to capture compressed
+        MJPG -- but cameras are fussy: some accept the MJPG request only when the
+        resolution is set first, some only when FOURCC is set first, and some
+        only on the Media Foundation backend rather than DirectShow. So we try
+        each combination and keep the FIRST that actually reports MJPG on
+        readback. If none stick we fall back to a plain open (still shows video,
+        just uncompressed) and the diagnostic logs the real format so we know."""
+        win = (os.name == "nt")
+        default_backend = cv2.CAP_DSHOW if win else 0
+
+        # Simple path: caller opted out of MJPG -- one plain open.
+        if not want_mjpg:
+            cap = cv2.VideoCapture(index, default_backend)
+            if cap.isOpened():
+                self._apply_format(cap, w, h, False, False)
+            return cap
+
+        # (backend, set FOURCC before resolution?) -- best-guess order first.
+        if win:
+            attempts = [
+                (cv2.CAP_DSHOW, False),   # width/height first, then MJPG
+                (cv2.CAP_DSHOW, True),    # MJPG first, then width/height
+                (cv2.CAP_MSMF, False),    # Media Foundation fallback
+            ]
+        else:
+            attempts = [(0, False), (0, True)]
+
+        fallback_cfg = None
+        for backend, fourcc_first in attempts:
+            cap = cv2.VideoCapture(index, backend)
+            got = False
+            if cap.isOpened():
+                self._apply_format(cap, w, h, True, fourcc_first)
+                # A probe read forces the driver to actually negotiate a format
+                # before we read it back.
+                try:
+                    got, _ = cap.read()
+                except Exception:
+                    got = False
+                if self._codec_str(cap) == "MJPG":
+                    return cap                      # success: MJPG stuck
+                if got and fallback_cfg is None:
+                    fallback_cfg = (backend, fourcc_first)
+            try:
+                cap.release()                       # never hold two opens per device
+            except Exception:
+                pass
+            time.sleep(0.15)                        # let Windows free the device
+
+        # No combination yielded MJPG; reopen the first one that at least
+        # produced frames (or the default) so the user still sees video.
+        backend, fourcc_first = fallback_cfg or (default_backend, False)
+        cap = cv2.VideoCapture(index, backend)
+        if cap.isOpened():
+            self._apply_format(cap, w, h, True, fourcc_first)
+        return cap
+
+    def _apply_format(self, cap, w, h, want_mjpg, fourcc_first):
+        """Apply MJPG (optional), resolution and FPS in the requested order."""
+        if want_mjpg and fourcc_first:
+            try:
+                cap.set(cv2.CAP_PROP_FOURCC, _fourcc("MJPG"))
+            except Exception:
+                pass
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        if want_mjpg and not fourcc_first:
+            try:
+                cap.set(cv2.CAP_PROP_FOURCC, _fourcc("MJPG"))
+            except Exception:
+                pass
+        try:
+            cap.set(cv2.CAP_PROP_FPS, self.args.fps)
+        except Exception:
+            pass
+
+    def _codec_str(self, cap):
+        """The 4-char FOURCC the capture is currently negotiated to (e.g. MJPG)."""
         try:
             raw = int(cap.get(cv2.CAP_PROP_FOURCC))
             codec = "".join(chr((raw >> (8 * i)) & 0xFF) for i in range(4))
-            codec = "".join(c for c in codec if c.isprintable()).strip() or "?"
+            return "".join(c for c in codec if c.isprintable()).strip() or "?"
+        except Exception:
+            return "?"
+
+    def _read_capture_format(self, cap):
+        """Read back and log what the camera actually negotiated. This is the
+        blind-fix diagnostic: it tells us whether MJPG stuck and at what FPS.
+        Printed to stderr AND appended to run-log.txt, so it is visible even
+        when the app is launched windowless via pythonw (run.bat)."""
+        if cap is None:
+            return "capture: (test pattern)"
+        try:
+            codec = self._codec_str(cap)
             aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             afps = cap.get(cv2.CAP_PROP_FPS) or 0.0
@@ -915,6 +998,11 @@ class VideoEngine:
             info = "capture: (format query failed: %s)" % e
         try:
             print("[pixelate-cam] " + info, file=sys.stderr, flush=True)
+        except Exception:
+            pass
+        try:
+            with open(LOG_PATH, "a", encoding="utf-8") as f:
+                f.write("[pixelate-cam] " + info + "\n")
         except Exception:
             pass
         return info
