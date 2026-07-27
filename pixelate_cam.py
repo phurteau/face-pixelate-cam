@@ -244,7 +244,7 @@ def notify(title, msg):
 # silently ignored so they never disrupt streaming.
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.8.1"
 REPO = "phurteau/face-pixelate-cam"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 # How long the banner stays on screen (seconds) before auto-hiding, so it never
@@ -848,8 +848,18 @@ class VideoEngine:
 
     # -- lifecycle ----------------------------------------------------------
     def start(self):
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread = threading.Thread(target=self._run_guarded, daemon=True)
         self._thread.start()
+
+    def _run_guarded(self):
+        # A daemon worker that dies on an unhandled exception would leave the
+        # preview stuck on "Starting camera..." forever with no explanation.
+        # Catch anything that escapes _run and surface it as a visible error.
+        try:
+            self._run()
+        except Exception as e:
+            self.cam_error = "Camera error: %s" % (
+                (str(e).splitlines() or ["unknown"])[0])
 
     def stop(self):
         self._stop.set()
@@ -916,66 +926,39 @@ class VideoEngine:
         return got in _FMT_MATCH.get(target, (target,))
 
     def _negotiate_capture(self, index, w, h, target):
-        """Open the camera and make the requested pixel format actually stick.
+        """Open the camera and request the desired pixel format WITHOUT blocking.
 
-        Windows USB webcams default to uncompressed YUY2. At 720p/1080p that
-        either exceeds USB 2.0 bandwidth or drops the camera to a few FPS, which
-        shows up as lag (only 640 stays 1:1). Capturing compressed MJPG fixes it
-        -- but cameras are fussy: some accept the format request only when the
-        resolution is set first, some only when FOURCC is set first, and some
-        only on the Media Foundation backend rather than DirectShow. So we try
-        each combination and keep the FIRST that actually reports `target` on
-        readback. If none stick we fall back to a plain open (still shows video)
-        and the diagnostic logs the real format so we know. `target` is a 4-char
-        FOURCC ("MJPG" or "YUY2"); None means just take the camera default."""
+        Starting reliably matters more than anything else. Earlier builds opened
+        and released the device up to three times and did blocking probe reads
+        (including a Media Foundation attempt) to confirm the format "stuck". On
+        some Windows USB cameras -- e.g. the Angetube 4K -- that open/release
+        churn left the device unable to deliver frames, and a blocking probe read
+        hung the worker thread before it ever reached the frame loop, so the
+        preview sat on "Starting camera..." forever. Instead we open ONCE on
+        DirectShow and set the format in place: no probe read, no release/reopen,
+        no sleeps. The frame loop's own read then delivers the first frame right
+        away. `target` is a 4-char FOURCC ("MJPG"/"YUY2") to request, or None for
+        the camera default. Whether MJPG actually stuck is reported by the
+        read-back diagnostic; if it did not, the stream still shows (just
+        uncompressed) and the user can force a format from the drawer."""
         win = (os.name == "nt")
         default_backend = cv2.CAP_DSHOW if win else 0
+        cap = cv2.VideoCapture(index, default_backend)
+        if not cap.isOpened():
+            return cap                          # caller reports "could not open"
 
-        # No specific target: one plain open at the camera's default format.
+        # No specific target: take the camera's default format.
         if not target:
-            cap = cv2.VideoCapture(index, default_backend)
-            if cap.isOpened():
-                self._apply_format(cap, w, h, None, False)
+            self._apply_format(cap, w, h, None, False)
             return cap
 
-        # (backend, set FOURCC before resolution?) -- best-guess order first.
-        if win:
-            attempts = [
-                (cv2.CAP_DSHOW, False),   # width/height first, then FOURCC
-                (cv2.CAP_DSHOW, True),    # FOURCC first, then width/height
-                (cv2.CAP_MSMF, False),    # Media Foundation fallback
-            ]
-        else:
-            attempts = [(0, False), (0, True)]
-
-        fallback_cfg = None
-        for backend, fourcc_first in attempts:
-            cap = cv2.VideoCapture(index, backend)
-            got = False
-            if cap.isOpened():
-                self._apply_format(cap, w, h, target, fourcc_first)
-                # A probe read forces the driver to actually negotiate a format
-                # before we read it back.
-                try:
-                    got, _ = cap.read()
-                except Exception:
-                    got = False
-                if self._fmt_matches(target, self._codec_str(cap)):
-                    return cap                      # success: target stuck
-                if got and fallback_cfg is None:
-                    fallback_cfg = (backend, fourcc_first)
-            try:
-                cap.release()                       # never hold two opens per device
-            except Exception:
-                pass
-            time.sleep(0.15)                        # let Windows free the device
-
-        # No combination yielded the target; reopen the first one that at least
-        # produced frames (or the default) so the user still sees video.
-        backend, fourcc_first = fallback_cfg or (default_backend, False)
-        cap = cv2.VideoCapture(index, backend)
-        if cap.isOpened():
-            self._apply_format(cap, w, h, target, fourcc_first)
+        # Request the target. Resolution-first is the most compatible order for
+        # DirectShow; if the driver reports the format did not take, set FOURCC
+        # first instead. Both are non-blocking cap.set calls on the SAME open
+        # handle -- we never release/reopen or read a probe frame here.
+        self._apply_format(cap, w, h, target, False)
+        if not self._fmt_matches(target, self._codec_str(cap)):
+            self._apply_format(cap, w, h, target, True)
         return cap
 
     def _apply_format(self, cap, w, h, target, fourcc_first):
@@ -1075,7 +1058,10 @@ class VideoEngine:
                 frame = self._synthetic_frame()
                 ok = True
             else:
-                ok, frame = cap.read()
+                try:
+                    ok, frame = cap.read()
+                except Exception:
+                    ok, frame = False, None
             if not ok or frame is None:
                 if not self.cam_error:
                     self.cam_error = "Camera opened but returned no frame."
