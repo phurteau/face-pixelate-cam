@@ -244,7 +244,7 @@ def notify(title, msg):
 # silently ignored so they never disrupt streaming.
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.8.0"
 REPO = "phurteau/face-pixelate-cam"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 # How long the banner stays on screen (seconds) before auto-hiding, so it never
@@ -373,6 +373,7 @@ DEFAULTS = {
     "mirror": False,       # selfie/mirror view
     "theme": "dark",       # "dark" (default) or "light"
     "accent": "#025500",   # single accent that drives all UI highlights
+    "capture_format": "Auto",  # "Auto" (prefer MJPG) | "MJPG" | "YUY2"
 }
 
 # Clamp ranges for each adjustable setting.
@@ -826,6 +827,9 @@ class VideoEngine:
         self._req_cam = int(args.camera)
         self._req_res = (int(args.width), int(args.height))
         self._applied_res = None
+        self._req_fmt = (getattr(args, "capture_format", None)
+                         or s.get("capture_format", "Auto"))
+        self._applied_fmt = None
         self.cam_error = None
         self.capture_info = None      # negotiated capture format, for diagnostics
 
@@ -859,6 +863,9 @@ class VideoEngine:
     def request_resolution(self, w, h):
         self._req_res = (int(w), int(h))
 
+    def request_format(self, fmt):
+        self._req_fmt = str(fmt)
+
     def set_vcam_enabled(self, on):
         if on and not HAVE_VCAM:
             self.vcam_status = "error"
@@ -877,9 +884,10 @@ class VideoEngine:
         if self.args.test_pattern:
             self._cam_index = index
             self._applied_res = (w, h)
+            self._applied_fmt = self._req_fmt
             return None
-        want_mjpg = not getattr(self.args, "no_mjpg", False)
-        cap = self._negotiate_capture(index, w, h, want_mjpg)
+        target = self._target_codec()
+        cap = self._negotiate_capture(index, w, h, target)
         # Keep only the newest frame so end-to-end latency can't accumulate.
         if cap is not None:
             try:
@@ -888,36 +896,53 @@ class VideoEngine:
                 pass
         self._cam_index = index
         self._applied_res = (w, h)
+        self._applied_fmt = self._req_fmt
         self.capture_info = self._read_capture_format(cap)
         return cap
 
-    def _negotiate_capture(self, index, w, h, want_mjpg):
-        """Open the camera and make MJPG actually stick.
+    def _target_codec(self):
+        """Map the requested format preference to the FOURCC we negotiate for.
+        Auto/MJPG target MJPG (compressed, best for high-res); YUY2 targets
+        uncompressed. Returns None for an unknown value (camera default)."""
+        fmt = str(self._req_fmt or "Auto").strip().upper()
+        if fmt in ("AUTO", "MJPG"):
+            return "MJPG"
+        if fmt in ("YUY2", "YUYV"):
+            return "YUY2"
+        return None
+
+    @staticmethod
+    def _fmt_matches(target, got):
+        return got in _FMT_MATCH.get(target, (target,))
+
+    def _negotiate_capture(self, index, w, h, target):
+        """Open the camera and make the requested pixel format actually stick.
 
         Windows USB webcams default to uncompressed YUY2. At 720p/1080p that
         either exceeds USB 2.0 bandwidth or drops the camera to a few FPS, which
-        shows up as lag (only 640 stays 1:1). The fix is to capture compressed
-        MJPG -- but cameras are fussy: some accept the MJPG request only when the
+        shows up as lag (only 640 stays 1:1). Capturing compressed MJPG fixes it
+        -- but cameras are fussy: some accept the format request only when the
         resolution is set first, some only when FOURCC is set first, and some
         only on the Media Foundation backend rather than DirectShow. So we try
-        each combination and keep the FIRST that actually reports MJPG on
-        readback. If none stick we fall back to a plain open (still shows video,
-        just uncompressed) and the diagnostic logs the real format so we know."""
+        each combination and keep the FIRST that actually reports `target` on
+        readback. If none stick we fall back to a plain open (still shows video)
+        and the diagnostic logs the real format so we know. `target` is a 4-char
+        FOURCC ("MJPG" or "YUY2"); None means just take the camera default."""
         win = (os.name == "nt")
         default_backend = cv2.CAP_DSHOW if win else 0
 
-        # Simple path: caller opted out of MJPG -- one plain open.
-        if not want_mjpg:
+        # No specific target: one plain open at the camera's default format.
+        if not target:
             cap = cv2.VideoCapture(index, default_backend)
             if cap.isOpened():
-                self._apply_format(cap, w, h, False, False)
+                self._apply_format(cap, w, h, None, False)
             return cap
 
         # (backend, set FOURCC before resolution?) -- best-guess order first.
         if win:
             attempts = [
-                (cv2.CAP_DSHOW, False),   # width/height first, then MJPG
-                (cv2.CAP_DSHOW, True),    # MJPG first, then width/height
+                (cv2.CAP_DSHOW, False),   # width/height first, then FOURCC
+                (cv2.CAP_DSHOW, True),    # FOURCC first, then width/height
                 (cv2.CAP_MSMF, False),    # Media Foundation fallback
             ]
         else:
@@ -928,15 +953,15 @@ class VideoEngine:
             cap = cv2.VideoCapture(index, backend)
             got = False
             if cap.isOpened():
-                self._apply_format(cap, w, h, True, fourcc_first)
+                self._apply_format(cap, w, h, target, fourcc_first)
                 # A probe read forces the driver to actually negotiate a format
                 # before we read it back.
                 try:
                     got, _ = cap.read()
                 except Exception:
                     got = False
-                if self._codec_str(cap) == "MJPG":
-                    return cap                      # success: MJPG stuck
+                if self._fmt_matches(target, self._codec_str(cap)):
+                    return cap                      # success: target stuck
                 if got and fallback_cfg is None:
                     fallback_cfg = (backend, fourcc_first)
             try:
@@ -945,26 +970,26 @@ class VideoEngine:
                 pass
             time.sleep(0.15)                        # let Windows free the device
 
-        # No combination yielded MJPG; reopen the first one that at least
+        # No combination yielded the target; reopen the first one that at least
         # produced frames (or the default) so the user still sees video.
         backend, fourcc_first = fallback_cfg or (default_backend, False)
         cap = cv2.VideoCapture(index, backend)
         if cap.isOpened():
-            self._apply_format(cap, w, h, True, fourcc_first)
+            self._apply_format(cap, w, h, target, fourcc_first)
         return cap
 
-    def _apply_format(self, cap, w, h, want_mjpg, fourcc_first):
-        """Apply MJPG (optional), resolution and FPS in the requested order."""
-        if want_mjpg and fourcc_first:
+    def _apply_format(self, cap, w, h, target, fourcc_first):
+        """Apply the target FOURCC (optional), resolution and FPS in order."""
+        if target and fourcc_first:
             try:
-                cap.set(cv2.CAP_PROP_FOURCC, _fourcc("MJPG"))
+                cap.set(cv2.CAP_PROP_FOURCC, _fourcc(target))
             except Exception:
                 pass
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-        if want_mjpg and not fourcc_first:
+        if target and not fourcc_first:
             try:
-                cap.set(cv2.CAP_PROP_FOURCC, _fourcc("MJPG"))
+                cap.set(cv2.CAP_PROP_FOURCC, _fourcc(target))
             except Exception:
                 pass
         try:
@@ -1029,7 +1054,9 @@ class VideoEngine:
 
         while not self._stop.is_set():
             # Apply pending camera / resolution changes.
-            if self._req_cam != self._cam_index or self._req_res != self._applied_res:
+            if (self._req_cam != self._cam_index
+                    or self._req_res != self._applied_res
+                    or self._req_fmt != self._applied_fmt):
                 if cap is not None:
                     try:
                         cap.release()
@@ -1143,8 +1170,37 @@ class VideoEngine:
 # ---------------------------------------------------------------------------
 
 DRAWER_W = 340
-RES_CHOICES = ["640x360", "1280x720", "1920x1080"]
+RES_CHOICES = ["640x360", "1280x720", "1920x1080"]   # legacy fallback (16:9)
 CAM_CHOICES = ["0", "1", "2", "3"]
+
+# Resolution choices grouped by display aspect ratio. The Aspect dropdown picks
+# a group; the Resolution dropdown then lists the sizes for that aspect. 4K
+# (3840x2160) is included for high-end cameras (e.g. Angetube 4K) -- pair it
+# with MJPG in the Format dropdown so the compressed stream fits USB bandwidth
+# and stays lag-free.
+ASPECT_CHOICES = ["16:9", "4:3", "16:10"]
+RES_BY_ASPECT = {
+    "16:9":  ["640x360", "1280x720", "1600x900", "1920x1080", "2560x1440", "3840x2160"],
+    "4:3":   ["640x480", "800x600", "1024x768", "1280x960", "1600x1200"],
+    "16:10": ["1280x800", "1440x900", "1680x1050", "1920x1200"],
+}
+
+# Capture pixel format the camera negotiates. "Auto" prefers MJPG (best for
+# high-res, no lag) and falls back if the camera refuses; "MJPG" forces
+# compressed; "YUY2" forces uncompressed for cameras that misbehave on MJPG.
+FORMAT_CHOICES = ["Auto", "MJPG", "YUY2"]
+# Some drivers report YUY2 under its FOURCC synonym YUYV; treat them as equal.
+_FMT_MATCH = {"MJPG": ("MJPG",), "YUY2": ("YUY2", "YUYV")}
+_ASPECT_RATIOS = {"16:9": 16 / 9, "4:3": 4 / 3, "16:10": 16 / 10}
+
+
+def _aspect_of(w, h):
+    """Nearest named aspect ratio for a WxH, to initialize the Aspect menu."""
+    try:
+        r = float(w) / float(h)
+    except Exception:
+        return "16:9"
+    return min(_ASPECT_RATIOS, key=lambda name: abs(_ASPECT_RATIOS[name] - r))
 
 
 def _tk_palette(theme_name, accent_hex):
@@ -1353,11 +1409,38 @@ class App:
         self._reg(om, "option")
         self._menus.append(om["menu"])
 
+        # Aspect ratio picks which resolution group the Resolution menu shows.
+        init_aspect = _aspect_of(self.args.width, self.args.height)
+        row = self._row(parent)
+        self._label(row, "Aspect ratio").pack(side="left")
+        self.var_aspect = tk.StringVar(value=init_aspect)
+        om = tk.OptionMenu(row, self.var_aspect, *ASPECT_CHOICES,
+                           command=self._on_aspect)
+        om.configure(relief="flat", bd=0, highlightthickness=0,
+                     font=("Segoe UI", 10), cursor="hand2", width=10)
+        om.pack(side="right")
+        self._reg(om, "option")
+        self._menus.append(om["menu"])
+
         row = self._row(parent)
         self._label(row, "Resolution").pack(side="left")
         self.var_res = tk.StringVar(value=f"{self.args.width}x{self.args.height}")
-        om = tk.OptionMenu(row, self.var_res, *RES_CHOICES,
-                           command=self._on_res)
+        res_choices = RES_BY_ASPECT.get(init_aspect, RES_CHOICES)
+        self.om_res = tk.OptionMenu(row, self.var_res, *res_choices,
+                                    command=self._on_res)
+        self.om_res.configure(relief="flat", bd=0, highlightthickness=0,
+                              font=("Segoe UI", 10), cursor="hand2", width=10)
+        self.om_res.pack(side="right")
+        self._reg(self.om_res, "option")
+        self._menus.append(self.om_res["menu"])
+
+        # Capture pixel format: Auto/MJPG stay smooth at high-res; YUY2 forces
+        # uncompressed for cameras that misbehave on MJPG.
+        row = self._row(parent)
+        self._label(row, "Format").pack(side="left")
+        self.var_fmt = tk.StringVar(value=self.s.get("capture_format", "Auto"))
+        om = tk.OptionMenu(row, self.var_fmt, *FORMAT_CHOICES,
+                           command=self._on_fmt)
         om.configure(relief="flat", bd=0, highlightthickness=0,
                      font=("Segoe UI", 10), cursor="hand2", width=10)
         om.pack(side="right")
@@ -1555,6 +1638,28 @@ class App:
         except Exception:
             pass
 
+    def _on_aspect(self, value):
+        """Rebuild the Resolution menu for the chosen aspect and pick the entry
+        whose width is closest to the current one."""
+        choices = RES_BY_ASPECT.get(value, RES_CHOICES)
+        menu = self.om_res["menu"]
+        menu.delete(0, "end")
+        for c in choices:
+            menu.add_command(
+                label=c,
+                command=self.tk._setit(self.var_res, c, self._on_res))
+        try:
+            cur_w = int(self.var_res.get().lower().split("x")[0])
+        except Exception:
+            cur_w = 0
+        newv = min(choices, key=lambda c: abs(int(c.split("x")[0]) - cur_w))
+        self.var_res.set(newv)
+        self._on_res(newv)
+
+    def _on_fmt(self, value):
+        self.s["capture_format"] = str(value)
+        self.engine.request_format(value)
+
     def _on_mirror(self):
         self.s["mirror"] = bool(self.var_mirror.get())
 
@@ -1587,6 +1692,8 @@ class App:
                 self._scales[k].set(v)
         self.var_pix.set(self.s["pixelate_on"])
         self.var_mirror.set(self.s.get("mirror", False))
+        self.var_fmt.set(self.s.get("capture_format", "Auto"))
+        self.engine.request_format(self.s.get("capture_format", "Auto"))
         self.pal = _tk_palette(self.s["theme"], self.s["accent"])
         self.btn_theme.configure(text=f"Theme: {self.s['theme']}")
         self.var_val.set(self._accent_value() * 100)
@@ -1783,7 +1890,14 @@ def main():
                     help="Do not force MJPG capture; use the camera's default "
                          "pixel format. MJPG is on by default so 720p/1080p "
                          "capture fits USB bandwidth and doesn't lag. Only use "
-                         "this if your camera refuses MJPG at your resolution.")
+                         "this if your camera refuses MJPG at your resolution. "
+                         "Shorthand for '--format YUY2' for this run only; "
+                         "prefer --format.")
+    ap.add_argument("--format", choices=["Auto", "MJPG", "YUY2"], default=None,
+                    help="Capture pixel format (persists to settings): Auto "
+                         "prefers MJPG and falls back if refused; MJPG forces "
+                         "compressed (smooth high-res); YUY2 forces uncompressed "
+                         "for cameras that misbehave on MJPG.")
     ap.add_argument("--no-vcam", action="store_true",
                     help="Do not start the virtual camera automatically. You can "
                          "still start it from the controls, or just capture this "
@@ -1816,7 +1930,14 @@ def main():
         s["theme"] = args.theme
     if args.mirror:
         s["mirror"] = True
-    if args.accent or args.theme or args.mirror:
+    # Capture format precedence: --format (explicit, persisted) > --no-mjpg
+    # (legacy shorthand -> YUY2, this run only) > saved setting.
+    if args.format:
+        s["capture_format"] = args.format
+    elif args.no_mjpg:
+        s["capture_format"] = "YUY2"   # this run only; not persisted below
+    args.capture_format = s.get("capture_format", "Auto")
+    if args.accent or args.theme or args.mirror or args.format:
         save_settings(s)
 
     try:
