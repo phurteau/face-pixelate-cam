@@ -244,7 +244,7 @@ def notify(title, msg):
 # silently ignored so they never disrupt streaming.
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 REPO = "phurteau/face-pixelate-cam"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 # How long the banner stays on screen (seconds) before auto-hiding, so it never
@@ -375,6 +375,7 @@ DEFAULTS = {
     "accent": "#025500",   # single accent that drives all UI highlights
     "capture_format": "Auto",  # "Auto" (prefer MJPG) | "MJPG" | "YUY2"
     "target_fps": 60,      # requested capture + virtual-camera frame rate (30/60)
+    "auto_tune": True,     # auto-force MJPG + lower resolution if fps drops below 30
 }
 
 # Run the face-detection CNN only every Nth captured frame and reuse the padded,
@@ -860,6 +861,17 @@ class VideoEngine:
         self._applied_fps = None
         self.cam_error = None
         self.capture_info = None      # negotiated capture format, for diagnostics
+        self.capture_mode = None      # structured {codec,w,h,fps} of the live capture
+        # Auto-tune: once frames are flowing, if the measured rate falls below the
+        # 30fps floor, force MJPG then step resolution down one notch at a time
+        # until it clears. Acts only AFTER the camera is streaming (never during
+        # the first open), so the v1.8.1 camera-start fix is untouched.
+        self._autotune = bool(s.get("auto_tune", True))
+        self._at_seen_mode = None     # (res, fmt, fps) last seen as applied
+        self._at_deadline = 0.0       # measure only after this warmup timestamp
+        self._at_steps = 0            # bounded count of downshifts performed
+        self._at_done = False         # cleared the floor / bottomed out -> stop
+        self.autotune_note = None     # last auto-tune action, for the status line
 
         # Threaded drop-to-latest capture. A dedicated reader thread owns the cap
         # and grabs frames as fast as the device delivers them, publishing only
@@ -921,6 +933,18 @@ class VideoEngine:
         # Floor at 30 (the user's minimum); the reader reopens the cap and the
         # processor rebuilds the vcam when this changes.
         self._req_fps = max(30, int(fps))
+
+    def set_autotune(self, on):
+        self._autotune = bool(on)
+        if on:
+            self.autotune_reeval()
+
+    def autotune_reeval(self):
+        # A manual resolution/format/fps change (or re-enabling auto-tune) clears
+        # the latch so auto-tune re-evaluates from the new baseline.
+        self._at_done = False
+        self._at_steps = 0
+        self.autotune_note = None
 
     def set_vcam_enabled(self, on):
         if on and not HAVE_VCAM:
@@ -1049,8 +1073,10 @@ class VideoEngine:
             aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             afps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+            self.capture_mode = {"codec": codec, "w": aw, "h": ah, "fps": afps}
             info = "capture: %s %dx%d @ %gfps" % (codec, aw, ah, afps)
         except Exception as e:
+            self.capture_mode = None
             info = "capture: (format query failed: %s)" % e
         try:
             print("[pixelate-cam] " + info, file=sys.stderr, flush=True)
@@ -1062,6 +1088,75 @@ class VideoEngine:
         except Exception:
             pass
         return info
+
+    # -- auto-tune: keep the measured rate at or above the floor --------------
+    AT_FLOOR = 30.0        # never leave the user below this measured fps
+    AT_WARMUP = 2.5        # let a fresh mode + the fps EMA settle before judging
+    AT_MAX_STEPS = 5       # bound on automatic downshifts per evaluation
+
+    def _next_lower_res(self, w, h):
+        """One notch down from (w,h): the largest known size with fewer pixels,
+        preferring the same aspect group so the framing does not jump."""
+        cur = int(w) * int(h)
+        pool = list(RES_BY_ASPECT.get(_aspect_of(w, h), []))
+        cands = []
+        for c in pool:
+            try:
+                cw, ch = (int(x) for x in c.lower().split("x"))
+            except Exception:
+                continue
+            if cw * ch < cur:
+                cands.append((cw * ch, cw, ch))
+        if not cands:                       # fall back to a generic 16:9 ladder
+            for cw, ch in ((1280, 720), (960, 540), (640, 360)):
+                if cw * ch < cur:
+                    cands.append((cw * ch, cw, ch))
+        if not cands:
+            return None
+        cands.sort()
+        return cands[-1][1], cands[-1][2]   # largest size that is still smaller
+
+    def _auto_tune(self, now):
+        """Called each processed frame. If the measured rate is under the floor,
+        force MJPG then step resolution down until it clears -- all AFTER the
+        camera is already streaming, reusing the same tested reopen path the UI
+        selectors use. Bounded and latching so it settles, not oscillates."""
+        if self.args.test_pattern or self.cam_error:
+            return
+        applied = (self._applied_res, self._applied_fmt, self._applied_fps)
+        if applied != self._at_seen_mode:
+            # A (re)open just happened: re-arm the warmup and let the EMA settle.
+            self._at_seen_mode = applied
+            self._at_deadline = now + self.AT_WARMUP
+            return
+        if self._at_done or now < self._at_deadline:
+            return
+        fps = self.fps
+        if fps < 1.0:
+            return                          # no real measurement yet
+        if fps >= self.AT_FLOOR or self._at_steps >= self.AT_MAX_STEPS:
+            self._at_done = True            # smooth enough, or out of steps
+            return
+        # Under the floor. Biggest single win is MJPG (huge USB bandwidth cut);
+        # only if we are already on MJPG do we step the resolution down.
+        codec = (self.capture_mode or {}).get("codec", "").upper()
+        if codec and "MJPG" not in codec and str(self._req_fmt).upper() != "MJPG":
+            self.request_format("MJPG")
+            self.autotune_note = "Auto-tune: forcing MJPG for smoother capture"
+            self._at_deadline = now + self.AT_WARMUP
+            return
+        applied_res = self._applied_res or self._req_res
+        if not applied_res:
+            return
+        nxt = self._next_lower_res(*applied_res)
+        if nxt is None:
+            self._at_done = True            # already at the smallest known size
+            return
+        self.request_resolution(*nxt)
+        self._at_steps += 1
+        self.autotune_note = "Auto-tuned to %dx%d for %d+ fps" % (
+            nxt[0], nxt[1], int(self.AT_FLOOR))
+        self._at_deadline = now + self.AT_WARMUP
 
     def _synthetic_frame(self):
         w, h = self._req_res
@@ -1201,6 +1296,8 @@ class VideoEngine:
             t_prev = now
             if dt > 0:
                 self.fps = 0.9 * self.fps + 0.1 * (1.0 / dt)
+            if self._autotune:
+                self._auto_tune(now)
 
             with self._lock:
                 self._frame = frame
@@ -1564,6 +1661,22 @@ class App:
         self.lbl_fps.configure(padx=10)
         self.lbl_fps.pack(side="right")
 
+        # Negotiated capture mode (codec + size), updated live -- shows what the
+        # camera actually delivered and what auto-tune settled on.
+        self.lbl_mode = self._label(self._row(parent), "", role="dim")
+        self.lbl_mode.pack(fill="x")
+
+        # Auto-tune: if the measured rate drops below 30fps, automatically force
+        # MJPG and lower the resolution one notch at a time until it is smooth.
+        self.var_autotune = tk.BooleanVar(value=bool(self.s.get("auto_tune", True)))
+        cba = tk.Checkbutton(self._row(parent),
+                             text="Auto-tune FPS (lower res if slow)",
+                             variable=self.var_autotune, command=self._on_autotune,
+                             anchor="w", font=("Segoe UI", 10), bd=0,
+                             highlightthickness=0, cursor="hand2")
+        cba.pack(fill="x")
+        self._reg(cba, "check")
+
         self.var_mirror = tk.BooleanVar(value=bool(self.s.get("mirror")))
         cb = tk.Checkbutton(self._row(parent), text="Mirror (selfie view)",
                             variable=self.var_mirror, command=self._on_mirror,
@@ -1752,6 +1865,7 @@ class App:
         try:
             w, h = (int(x) for x in value.lower().split("x"))
             self.engine.request_resolution(w, h)
+            self.engine.autotune_reeval()
         except Exception:
             pass
 
@@ -1776,10 +1890,17 @@ class App:
     def _on_fmt(self, value):
         self.s["capture_format"] = str(value)
         self.engine.request_format(value)
+        self.engine.autotune_reeval()
 
     def _on_fps(self, value):
         self.s["target_fps"] = int(value)
         self.engine.request_fps(int(value))
+        self.engine.autotune_reeval()
+
+    def _on_autotune(self):
+        on = bool(self.var_autotune.get())
+        self.s["auto_tune"] = on
+        self.engine.set_autotune(on)
 
     def _on_mirror(self):
         self.s["mirror"] = bool(self.var_mirror.get())
@@ -1817,6 +1938,12 @@ class App:
         self.engine.request_format(self.s.get("capture_format", "Auto"))
         self.var_fps.set(str(int(self.s.get("target_fps", 60))))
         self.engine.request_fps(int(self.s.get("target_fps", 60)))
+        if hasattr(self, "var_autotune"):
+            at = bool(self.s.get("auto_tune", True))
+            self.var_autotune.set(at)
+            self.engine.set_autotune(at)
+            if hasattr(self, "lbl_mode"):
+                self.lbl_mode.configure(text="")
         self.pal = _tk_palette(self.s["theme"], self.s["accent"])
         self.btn_theme.configure(text=f"Theme: {self.s['theme']}")
         self.var_val.set(self._accent_value() * 100)
@@ -1974,6 +2101,18 @@ class App:
         fps = getattr(eng, "fps", 0.0)
         self.lbl_fps.configure(text=(f"{fps:.0f} fps" if fps >= 1 else "-- fps"))
 
+        # Negotiated capture mode, or the latest auto-tune note if one is pending.
+        if hasattr(self, "lbl_mode"):
+            cm = getattr(eng, "capture_mode", None)
+            note = getattr(eng, "autotune_note", None)
+            if note:
+                self.lbl_mode.configure(text=note)
+            elif cm:
+                self.lbl_mode.configure(text="%s %dx%d" % (
+                    cm.get("codec", "?"), cm.get("w", 0), cm.get("h", 0)))
+            else:
+                self.lbl_mode.configure(text="")
+
         upd = self.update_state.get("update")
         if upd and not self.update_state.get("dismissed"):
             status = self.update_state.get("status")
@@ -2040,6 +2179,9 @@ def main():
                     help="Set the UI theme (persists to settings).")
     ap.add_argument("--no-update-check", action="store_true",
                     help="Do not check GitHub for a newer version on launch.")
+    ap.add_argument("--no-auto-tune", action="store_true",
+                    help="Disable auto-tune (do not auto-force MJPG / lower the "
+                         "resolution when the measured rate drops below 30fps).")
     # Accepted for backward compatibility with older shortcuts; the GUI always
     # shows the video, and the settings live behind the corner menu.
     ap.add_argument("--clean", action="store_true", help=argparse.SUPPRESS)
@@ -2072,7 +2214,10 @@ def main():
     if fps_explicit:
         s["target_fps"] = max(30, int(args.fps))
     args.fps = int(s.get("target_fps", 60))
-    if args.accent or args.theme or args.mirror or args.format or fps_explicit:
+    if args.no_auto_tune:
+        s["auto_tune"] = False
+    if (args.accent or args.theme or args.mirror or args.format or fps_explicit
+            or args.no_auto_tune):
         save_settings(s)
 
     try:
