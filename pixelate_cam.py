@@ -244,7 +244,7 @@ def notify(title, msg):
 # silently ignored so they never disrupt streaming.
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.9.1"
+APP_VERSION = "1.10.0"
 REPO = "phurteau/face-pixelate-cam"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases/latest"
 # How long the banner stays on screen (seconds) before auto-hiding, so it never
@@ -376,6 +376,7 @@ DEFAULTS = {
     "capture_format": "Auto",  # "Auto" (prefer MJPG) | "MJPG" | "YUY2"
     "target_fps": 60,      # requested capture + virtual-camera frame rate (30/60)
     "auto_tune": True,     # auto-force MJPG + lower resolution if fps drops below 30
+    "backend": "Auto",     # capture backend: "Auto" (MSMF+HW decode, DShow fallback) | "MSMF" | "DirectShow"
 }
 
 # Run the face-detection CNN only every Nth captured frame and reuse the padded,
@@ -859,6 +860,17 @@ class VideoEngine:
         _seed_fps = getattr(args, "fps", None)
         self._req_fps = int(_seed_fps) if _seed_fps else int(s.get("target_fps", 60))
         self._applied_fps = None
+        self._req_backend = (getattr(args, "backend", None)
+                             or s.get("backend", "Auto"))
+        self._applied_backend = None
+        # Auto-backend fallback bookkeeping: an Auto open tries MSMF (hardware
+        # decode) first; if it delivers no frame within OPEN_FRAME_TIMEOUT we fall
+        # back to DirectShow ONCE and latch it so it can't flip-flop. Cleared when
+        # the user picks a backend explicitly from the drawer / CLI.
+        self._auto_fell_back = False
+        self._open_is_auto_msmf = False   # current cap is a provisional Auto->MSMF open
+        self._open_deadline = 0.0
+        self._active_backend = None       # backend the live cap was opened with
         self.cam_error = None
         self.capture_info = None      # negotiated capture format, for diagnostics
         self.capture_mode = None      # structured {codec,w,h,fps} of the live capture
@@ -934,6 +946,12 @@ class VideoEngine:
         # processor rebuilds the vcam when this changes.
         self._req_fps = max(30, int(fps))
 
+    def request_backend(self, backend):
+        # Changing the backend reopens the cap (see the reader-loop predicate).
+        # Clearing the fallback latch honors the fresh choice and re-tries MSMF.
+        self._req_backend = str(backend)
+        self._auto_fell_back = False
+
     def set_autotune(self, on):
         self._autotune = bool(on)
         if on:
@@ -966,9 +984,18 @@ class VideoEngine:
             self._applied_res = (w, h)
             self._applied_fmt = self._req_fmt
             self._applied_fps = self._req_fps
+            self._applied_backend = self._req_backend
+            self._open_is_auto_msmf = False
             return None
         target = self._target_codec()
-        cap = self._negotiate_capture(index, w, h, target)
+        backend = self._effective_backend()
+        self._active_backend = backend
+        cap = self._negotiate_capture(index, w, h, target, backend)
+        # An Auto open provisionally uses MSMF (hardware decode). Flag it so the
+        # reader loop can fall back to DirectShow if no frame arrives in time.
+        self._open_is_auto_msmf = (backend == "MSMF"
+                                   and str(self._req_backend or "").lower() == "auto")
+        self._open_deadline = time.time() + OPEN_FRAME_TIMEOUT
         # Keep only the newest frame so end-to-end latency can't accumulate.
         if cap is not None:
             try:
@@ -979,8 +1006,26 @@ class VideoEngine:
         self._applied_res = (w, h)
         self._applied_fmt = self._req_fmt
         self._applied_fps = self._req_fps
+        self._applied_backend = self._req_backend
         self.capture_info = self._read_capture_format(cap)
         return cap
+
+    def _effective_backend(self):
+        """Resolve the backend to actually open with. 'Auto' -> MSMF (hardware
+        decode) unless we've already fallen back to DirectShow for this device or
+        this OpenCV build has no MSMF. Non-Windows always uses the platform
+        default."""
+        if os.name != "nt":
+            return "Default"
+        pref = str(self._req_backend or "Auto").strip().lower()
+        if pref in ("directshow", "dshow"):
+            return "DirectShow"
+        if pref == "msmf":
+            return "MSMF" if _CAP_MSMF is not None else "DirectShow"
+        # Auto: MSMF first (hardware decode) until proven silent on this device.
+        if self._auto_fell_back or _CAP_MSMF is None:
+            return "DirectShow"
+        return "MSMF"
 
     def _target_codec(self):
         """Map the requested format preference to the FOURCC we negotiate for.
@@ -997,8 +1042,9 @@ class VideoEngine:
     def _fmt_matches(target, got):
         return got in _FMT_MATCH.get(target, (target,))
 
-    def _negotiate_capture(self, index, w, h, target):
-        """Open the camera and request the desired pixel format WITHOUT blocking.
+    def _negotiate_capture(self, index, w, h, target, backend):
+        """Open the camera on the chosen backend and request the desired pixel
+        format WITHOUT blocking.
 
         Starting reliably matters more than anything else. Earlier builds opened
         and released the device up to three times and did blocking probe reads
@@ -1006,16 +1052,16 @@ class VideoEngine:
         some Windows USB cameras -- e.g. the Angetube 4K -- that open/release
         churn left the device unable to deliver frames, and a blocking probe read
         hung the worker thread before it ever reached the frame loop, so the
-        preview sat on "Starting camera..." forever. Instead we open ONCE on
-        DirectShow and set the format in place: no probe read, no release/reopen,
-        no sleeps. The frame loop's own read then delivers the first frame right
-        away. `target` is a 4-char FOURCC ("MJPG"/"YUY2") to request, or None for
-        the camera default. Whether MJPG actually stuck is reported by the
-        read-back diagnostic; if it did not, the stream still shows (just
-        uncompressed) and the user can force a format from the drawer."""
-        win = (os.name == "nt")
-        default_backend = cv2.CAP_DSHOW if win else 0
-        cap = cv2.VideoCapture(index, default_backend)
+        preview sat on "Starting camera..." forever. Instead we open ONCE (MSMF
+        with hardware decode for "Auto"/"MSMF", else DirectShow) and set the
+        format in place: no probe read, no release/reopen, no sleeps. The frame
+        loop's own read then delivers the first frame right away; if a provisional
+        Auto->MSMF open turns out silent, the reader loop falls back to DirectShow.
+        `target` is a 4-char FOURCC ("MJPG"/"YUY2") to request, or None for the
+        camera default. Whether MJPG actually stuck is reported by the read-back
+        diagnostic; if it did not, the stream still shows (just uncompressed) and
+        the user can force a format from the drawer."""
+        cap = self._open_backend(index, backend)
         if not cap.isOpened():
             return cap                          # caller reports "could not open"
 
@@ -1032,6 +1078,27 @@ class VideoEngine:
         if not self._fmt_matches(target, self._codec_str(cap)):
             self._apply_format(cap, w, h, target, True)
         return cap
+
+    def _open_backend(self, index, backend):
+        """Open the VideoCapture on the chosen backend. MSMF is opened with a
+        hardware-acceleration request (via the params-list VideoCapture overload)
+        so the driver routes MJPEG/JPEG decode to the GPU -- the high-res FPS fix.
+        DirectShow / platform-default open plainly. Falls back to a plain open if
+        this OpenCV build rejects the params form (needs OpenCV >= 4.5.2)."""
+        if backend == "MSMF" and _CAP_MSMF is not None:
+            if _HW_ACCEL_PROP is not None and _HW_ACCEL_ANY is not None:
+                try:
+                    return cv2.VideoCapture(
+                        index, _CAP_MSMF,
+                        [int(_HW_ACCEL_PROP), int(_HW_ACCEL_ANY)])
+                except Exception:
+                    pass
+            return cv2.VideoCapture(index, _CAP_MSMF)
+        if backend == "DirectShow" and _CAP_DSHOW is not None:
+            return cv2.VideoCapture(index, _CAP_DSHOW)
+        # Platform default (non-Windows, or a backend unavailable in this build).
+        be = _CAP_DSHOW if (os.name == "nt" and _CAP_DSHOW is not None) else 0
+        return cv2.VideoCapture(index, be)
 
     def _apply_format(self, cap, w, h, target, fourcc_first):
         """Apply the target FOURCC (optional), resolution and FPS in order."""
@@ -1061,6 +1128,24 @@ class VideoEngine:
         except Exception:
             return "?"
 
+    def _backend_label(self, cap):
+        """Human label of the backend the cap opened on, plus '/hw' when hardware
+        acceleration is active -- for the read-back diagnostic (e.g. 'MSMF/hw')."""
+        name = self._active_backend or "?"
+        try:
+            bn = cap.getBackendName()
+            if bn:
+                name = bn
+        except Exception:
+            pass
+        if _HW_ACCEL_PROP is not None:
+            try:
+                if int(cap.get(_HW_ACCEL_PROP)) > 0:
+                    name += "/hw"
+            except Exception:
+                pass
+        return name
+
     def _read_capture_format(self, cap):
         """Read back and log what the camera actually negotiated. This is the
         blind-fix diagnostic: it tells us whether MJPG stuck and at what FPS.
@@ -1073,8 +1158,10 @@ class VideoEngine:
             aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             afps = cap.get(cv2.CAP_PROP_FPS) or 0.0
-            self.capture_mode = {"codec": codec, "w": aw, "h": ah, "fps": afps}
-            info = "capture: %s %dx%d @ %gfps" % (codec, aw, ah, afps)
+            be = self._backend_label(cap)
+            self.capture_mode = {"codec": codec, "w": aw, "h": ah, "fps": afps,
+                                 "backend": be}
+            info = "capture: %s %dx%d @ %gfps [%s]" % (codec, aw, ah, afps, be)
         except Exception as e:
             self.capture_mode = None
             info = "capture: (format query failed: %s)" % e
@@ -1201,7 +1288,8 @@ class VideoEngine:
             if (self._req_cam != self._cam_index
                     or self._req_res != self._applied_res
                     or self._req_fmt != self._applied_fmt
-                    or self._req_fps != self._applied_fps):
+                    or self._req_fps != self._applied_fps
+                    or self._req_backend != self._applied_backend):
                 if cap is not None:
                     try:
                         cap.release()
@@ -1225,11 +1313,33 @@ class VideoEngine:
                 except Exception:
                     ok, frame = False, None
             if not ok or frame is None:
+                # Auto-backend watchdog: a provisional MSMF (hardware-decode) open
+                # that never delivered a frame -- either it won't open or it opened
+                # silent -- is the MSMF failure mode. Fall back to DirectShow once
+                # and reopen, so "Start camera" never hangs on MSMF.
+                if (self._open_is_auto_msmf and not self.args.test_pattern
+                        and (cap is None or not cap.isOpened()
+                             or time.time() > self._open_deadline)):
+                    self._open_is_auto_msmf = False
+                    self._auto_fell_back = True
+                    self.autotune_note = "hardware decode unavailable; using DirectShow"
+                    try:
+                        if cap is not None:
+                            cap.release()
+                    except Exception:
+                        pass
+                    cap = self._open_camera(self._req_cam, *self._req_res)
+                    if cap is not None and not cap.isOpened():
+                        self.cam_error = f"Could not open camera index {self._req_cam}."
+                    else:
+                        self.cam_error = None
+                    continue
                 if not self.cam_error:
                     self.cam_error = "Camera opened but returned no frame."
                 time.sleep(0.03)
                 continue
             self.cam_error = None
+            self._open_is_auto_msmf = False   # a frame arrived: the backend is good
 
             # Publish the newest frame; the processor drops any it missed.
             with self._rlock:
@@ -1385,6 +1495,20 @@ FORMAT_CHOICES = ["Auto", "MJPG", "YUY2"]
 # Requested frame rate. 60 is preferred; the camera may deliver fewer at high
 # resolution (the live readout next to the menu shows the measured rate).
 FPS_CHOICES = ["30", "60", "90", "120"]
+# Capture backend. "Auto" opens Media Foundation (MSMF) with hardware-accelerated
+# decode -- that offloads MJPEG/JPEG decode to the GPU so 1080p/4K hold their FPS
+# instead of the CPU choking on software decode (the high-res lag) -- and falls
+# back to DirectShow automatically if MSMF opens but delivers no frames (the
+# historical Angetube "no frame" failure mode). "MSMF" forces Media Foundation;
+# "DirectShow" forces the legacy backend (most compatible, software decode only).
+BACKEND_CHOICES = ["Auto", "MSMF", "DirectShow"]
+_CAP_MSMF = getattr(cv2, "CAP_MSMF", None)
+_CAP_DSHOW = getattr(cv2, "CAP_DSHOW", None)
+_HW_ACCEL_PROP = getattr(cv2, "CAP_PROP_HW_ACCELERATION", None)
+_HW_ACCEL_ANY = getattr(cv2, "VIDEO_ACCELERATION_ANY", None)
+# Seconds an Auto-mode MSMF open may go without delivering a first frame before we
+# treat it as the silent-MSMF failure and fall back to DirectShow (once, latched).
+OPEN_FRAME_TIMEOUT = 2.5
 # Some drivers report YUY2 under its FOURCC synonym YUYV; treat them as equal.
 _FMT_MATCH = {"MJPG": ("MJPG",), "YUY2": ("YUY2", "YUYV")}
 _ASPECT_RATIOS = {"16:9": 16 / 9, "4:3": 4 / 3, "16:10": 16 / 10}
@@ -1643,6 +1767,20 @@ class App:
         self._reg(om, "option")
         self._menus.append(om["menu"])
 
+        # Capture backend: Auto (Media Foundation + hardware decode -- best
+        # high-res FPS -- with automatic DirectShow fallback) / MSMF / DirectShow
+        # (legacy, most compatible). Mirrors the Format menu.
+        row = self._row(parent)
+        self._label(row, "Camera backend").pack(side="left")
+        self.var_backend = tk.StringVar(value=self.s.get("backend", "Auto"))
+        om = tk.OptionMenu(row, self.var_backend, *BACKEND_CHOICES,
+                           command=self._on_backend)
+        om.configure(relief="flat", bd=0, highlightthickness=0,
+                     font=("Segoe UI", 10), cursor="hand2", width=10)
+        om.pack(side="right")
+        self._reg(om, "option")
+        self._menus.append(om["menu"])
+
         # Frame rate: request 30/60/90/120 fps. The camera clamps to the highest
         # rate it actually supports at the chosen resolution; the label to the left
         # of the menu shows the measured processed-frame rate live, so the user can
@@ -1892,6 +2030,11 @@ class App:
         self.engine.request_format(value)
         self.engine.autotune_reeval()
 
+    def _on_backend(self, value):
+        self.s["backend"] = str(value)
+        self.engine.request_backend(value)
+        self.engine.autotune_reeval()
+
     def _on_fps(self, value):
         self.s["target_fps"] = int(value)
         self.engine.request_fps(int(value))
@@ -1936,6 +2079,9 @@ class App:
         self.var_mirror.set(self.s.get("mirror", False))
         self.var_fmt.set(self.s.get("capture_format", "Auto"))
         self.engine.request_format(self.s.get("capture_format", "Auto"))
+        if hasattr(self, "var_backend"):
+            self.var_backend.set(self.s.get("backend", "Auto"))
+            self.engine.request_backend(self.s.get("backend", "Auto"))
         self.var_fps.set(str(int(self.s.get("target_fps", 60))))
         self.engine.request_fps(int(self.s.get("target_fps", 60)))
         if hasattr(self, "var_autotune"):
@@ -2167,6 +2313,13 @@ def main():
                          "prefers MJPG and falls back if refused; MJPG forces "
                          "compressed (smooth high-res); YUY2 forces uncompressed "
                          "for cameras that misbehave on MJPG.")
+    ap.add_argument("--backend", choices=["Auto", "MSMF", "DirectShow"],
+                    default=None,
+                    help="Camera capture backend (persists to settings): Auto uses "
+                         "Media Foundation with hardware-accelerated decode (best "
+                         "high-res FPS) and falls back to DirectShow if the camera "
+                         "returns no frames; MSMF forces Media Foundation; "
+                         "DirectShow forces the legacy backend (most compatible).")
     ap.add_argument("--no-vcam", action="store_true",
                     help="Do not start the virtual camera automatically. You can "
                          "still start it from the controls, or just capture this "
@@ -2209,6 +2362,11 @@ def main():
     elif args.no_mjpg:
         s["capture_format"] = "YUY2"   # this run only; not persisted below
     args.capture_format = s.get("capture_format", "Auto")
+    # Backend precedence: --backend (explicit, persisted) > saved setting > Auto.
+    backend_explicit = args.backend is not None
+    if backend_explicit:
+        s["backend"] = args.backend
+    args.backend = s.get("backend", "Auto")
     # Frame-rate precedence: --fps (explicit, persisted) > saved target_fps > 60.
     fps_explicit = args.fps is not None
     if fps_explicit:
@@ -2217,7 +2375,7 @@ def main():
     if args.no_auto_tune:
         s["auto_tune"] = False
     if (args.accent or args.theme or args.mirror or args.format or fps_explicit
-            or args.no_auto_tune):
+            or args.no_auto_tune or backend_explicit):
         save_settings(s)
 
     try:
